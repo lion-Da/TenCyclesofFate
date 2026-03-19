@@ -155,6 +155,7 @@ async def _get_ai_response_impl(
 
     max_retries = 7
     base_delay = 1  # 基础延迟时间（秒）
+    json_reminder_injected = False  # 是否已注入JSON格式提醒
 
     for attempt in range(max_retries):
         _model = model
@@ -179,6 +180,23 @@ async def _get_ai_response_impl(
                 ret = ret[ret.rfind("</think>") + 8 :].strip()
 
             if force_json:
+                # Check if response contains any JSON at all
+                if '{' not in ret:
+                    logger.warning(
+                        f"AI返回非JSON内容 (尝试 {attempt + 1}/{max_retries}): {ret[:200]}"
+                    )
+                    # Inject a strong JSON reminder for subsequent retries
+                    if not json_reminder_injected:
+                        messages.append({"role": "assistant", "content": ret})
+                        messages.append({"role": "user", "content":
+                            "【系统指令】你的回复格式错误。你是游戏司命星君，不是AI助手。"
+                            "请严格按JSON格式回复：\n"
+                            '{"narrative": "叙事文本", "state_update": {...}}\n'
+                            "不要自我介绍，不要输出JSON以外的任何内容。"
+                        })
+                        json_reminder_injected = True
+                    raise ValueError(f"响应不含JSON结构: {ret[:100]}")
+
                 try:
                     from .game_logic import _robust_json_loads
                     json_part = _robust_json_loads(_extract_json_from_response(ret) or "{}")

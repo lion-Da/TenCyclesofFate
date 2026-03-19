@@ -1099,6 +1099,28 @@ async def _parse_with_continuation(
     # ★ Pre-fix: escape unescaped literary quotes in the raw response
     combined = _fix_unescaped_quotes_in_json(combined)
 
+    # ── Step 0: detect completely non-JSON response (model ignored system prompt) ──
+    if '{' not in combined:
+        logger.warning(
+            f"Response contains no JSON at all ({len(combined)} chars). "
+            f"Model likely ignored system prompt. First 200: {combined[:200]}"
+        )
+        # Use the raw text as narrative so the player sees something
+        fallback_narrative = combined.strip()
+        if len(fallback_narrative) > 10:
+            return {
+                "narrative": (
+                    "【天机偶有紊乱】\n\n"
+                    "天道回应出现偏差，星君正在重新梳理因果脉络……\n\n"
+                    "请再次尝试你的行动。"
+                ),
+                "state_update": {}
+            }
+        raise json.JSONDecodeError(
+            "Response contains no JSON structure at all",
+            combined[:200], 0
+        )
+
     # ── Step 1: direct parse ──
     json_str = _extract_json_from_response(combined)
     if json_str:
@@ -1319,6 +1341,24 @@ async def _get_ai_response_streaming(
         logger.warning(f"Stream failed or empty, falling back to non-stream API")
         full_response = await ai_service.get_ai_response(
             prompt=prompt, history=history, user_id=player_id
+        )
+
+    # If response contains no JSON at all (model ignored system prompt),
+    # retry once with a reinforced prompt
+    if full_response and '{' not in full_response:
+        logger.warning(
+            f"Stream response has no JSON for {player_id} ({len(full_response)} chars). "
+            f"Retrying with reinforced prompt..."
+        )
+        reinforced_prompt = (
+            prompt + "\n\n"
+            "【系统提醒】你必须严格以JSON格式回复，格式为：\n"
+            '{"narrative": "叙事文本", "state_update": {...}} 或 {"narrative": "叙事文本", "roll_request": {...}}\n'
+            "不要输出任何JSON之外的内容。不要自我介绍。你是游戏司命星君。"
+        )
+        full_response = await ai_service.get_ai_response(
+            prompt=reinforced_prompt, history=history,
+            force_json=False, user_id=player_id
         )
 
     return full_response
