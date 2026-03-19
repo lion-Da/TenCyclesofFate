@@ -50,9 +50,10 @@
                 <div id="auth-register" class="auth-form">
                     <input type="email" id="register-email" placeholder="邮箱地址" autocomplete="email">
                     <div class="code-row">
-                        <input type="text" id="register-code" placeholder="验证码" maxlength="6" autocomplete="one-time-code">
-                        <button class="send-code-btn" id="send-code-btn" onclick="handleSendCode()">发送验证码</button>
+                        <input type="text" id="register-code" placeholder="请输入6位邀请码" maxlength="6" autocomplete="one-time-code">
+                        <button class="send-code-btn" id="send-code-btn" disabled title="邮箱验证码暂未开放">发送验证码</button>
                     </div>
+                    <p class="auth-hint">请输入6位邀请码完成注册</p>
                     <input type="password" id="register-password" placeholder="密码（至少6位）" autocomplete="new-password">
                     <button class="auth-submit-btn" onclick="handleEmailRegister()">注册</button>
                 </div>
@@ -60,7 +61,7 @@
 
             <div class="auth-divider"><span>或</span></div>
 
-            <a href="/api/login/linuxdo" class="login-button">使用 Linux.do 登录</a>
+            <a class="login-button login-button-disabled" title="该渠道暂时关闭维护中">使用 Linux.do 登录</a>
             <p id="login-error" class="error-message"></p>
         </div>
 

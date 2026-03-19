@@ -239,6 +239,14 @@ body::after {
     cursor: not-allowed;
 }
 
+.auth-hint {
+    font-size: 0.75rem;
+    color: #999;
+    margin: -0.3rem 0 0.8rem 0;
+    text-align: left;
+    line-height: 1.4;
+}
+
 .auth-submit-btn {
     display: block;
     width: 100%;
@@ -301,11 +309,20 @@ body::after {
     text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.4);
 }
 
-.login-button:hover {
+.login-button:hover:not(.login-button-disabled) {
     background: linear-gradient(145deg, #c95c53, var(--accent-color));
     transform: translateY(-3px);
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3), inset 0 2px 3px rgba(255, 255, 255, 0.3);
     color: white;
+}
+.login-button-disabled {
+    background: #555;
+    color: #999;
+    cursor: not-allowed;
+    opacity: 0.5;
+    pointer-events: none;
+    box-shadow: none;
+    text-shadow: none;
 }
 
 .error-message {

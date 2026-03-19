@@ -51,11 +51,9 @@ root_router = APIRouter()
 async def login_linuxdo(request: Request):
     """
     Redirects the user to Linux.do for authentication.
+    临时关闭: Linux.do 登录渠道维护中
     """
-    # Use a hardcoded, absolute URL for the callback to avoid ambiguity
-    # This must match the URL registered in your Linux.do OAuth application settings.
-    redirect_uri = str(request.url.replace(path="/callback"))
-    return await auth.oauth.linuxdo.authorize_redirect(request, redirect_uri)
+    raise HTTPException(status_code=503, detail="Linux.do 登录渠道暂时关闭维护中")
 
 @root_router.get('/callback')
 async def auth_linuxdo_callback(request: Request):
@@ -131,9 +129,17 @@ async def send_verification_code(request: EmailSendCodeRequest):
     return await email_auth.send_verification_code(request.email, request.purpose)
 
 @api_router.post("/auth/register")
-async def register_with_email(request: EmailRegisterRequest):
-    """使用邮箱注册"""
-    return await email_auth.register_user(request.email, request.password, request.code)
+async def register_with_email(request: EmailRegisterRequest, raw_request: Request):
+    """使用邮箱注册（支持邮箱验证码或邀请码）"""
+    # 获取客户端真实IP（支持反向代理）
+    client_ip = (
+        raw_request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or raw_request.headers.get("X-Real-IP", "")
+        or (raw_request.client.host if raw_request.client else "")
+    )
+    return await email_auth.register_user(
+        request.email, request.password, request.code, client_ip=client_ip
+    )
 
 @api_router.post("/auth/login")
 async def login_with_email(request: EmailLoginRequest):
