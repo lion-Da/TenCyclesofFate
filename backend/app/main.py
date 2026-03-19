@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel
 
-from . import auth, game_logic, state_manager, security
+from . import auth, game_logic, state_manager, security, legacy_system, email_auth
 from .websocket_manager import manager as websocket_manager
 from .live_system import live_manager
 from .config import settings
@@ -109,6 +109,51 @@ async def logout():
     response.delete_cookie("token")
     return response
 
+
+# --- Email Authentication Routes ---
+
+class EmailSendCodeRequest(BaseModel):
+    email: str
+    purpose: str = "register"  # "register" | "login" | "reset"
+
+class EmailRegisterRequest(BaseModel):
+    email: str
+    password: str
+    code: str
+
+class EmailLoginRequest(BaseModel):
+    email: str
+    password: str
+
+@api_router.post("/auth/send-code")
+async def send_verification_code(request: EmailSendCodeRequest):
+    """发送邮箱验证码"""
+    return await email_auth.send_verification_code(request.email, request.purpose)
+
+@api_router.post("/auth/register")
+async def register_with_email(request: EmailRegisterRequest):
+    """使用邮箱注册"""
+    return await email_auth.register_user(request.email, request.password, request.code)
+
+@api_router.post("/auth/login")
+async def login_with_email(request: EmailLoginRequest):
+    """使用邮箱登录"""
+    result = await email_auth.login_user(request.email, request.password)
+    if result["success"] and result.get("token"):
+        from fastapi.responses import JSONResponse
+        response = JSONResponse(content={"success": True, "message": result["message"]})
+        from datetime import timedelta
+        max_age = int(timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES).total_seconds())
+        response.set_cookie(
+            "token",
+            value=result["token"],
+            httponly=True,
+            max_age=max_age,
+            samesite="lax",
+        )
+        return response
+    return result
+
 # --- Game Routes ---
 @api_router.get("/live/players")
 async def get_live_players():
@@ -125,6 +170,40 @@ async def init_game(
     """
     game_state = await game_logic.get_or_create_daily_session(current_user)
     return game_state
+
+
+# --- Legacy System Routes ---
+
+class BlessingPurchaseRequest(BaseModel):
+    blessing_id: str
+
+@api_router.get("/legacy")
+async def get_legacy(
+    current_user: Annotated[dict, Depends(auth.get_current_active_user)],
+):
+    """获取玩家的继承系统数据（功德点、可用先天奖励等）"""
+    player_id = current_user["username"]
+    return await legacy_system.get_legacy_data(player_id)
+
+
+@api_router.post("/legacy/purchase")
+async def purchase_blessing(
+    request: BlessingPurchaseRequest,
+    current_user: Annotated[dict, Depends(auth.get_current_active_user)],
+):
+    """购买一个先天奖励"""
+    player_id = current_user["username"]
+    return await legacy_system.purchase_blessing(player_id, request.blessing_id)
+
+
+@api_router.post("/legacy/clear")
+async def clear_blessings(
+    current_user: Annotated[dict, Depends(auth.get_current_active_user)],
+):
+    """清除当前激活的先天奖励（新一天开始时由前端调用或自动执行）"""
+    player_id = current_user["username"]
+    await legacy_system.clear_active_blessings(player_id)
+    return {"success": True}
 
 # --- WebSocket Endpoint ---
 @api_router.websocket("/ws")
@@ -161,6 +240,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 await game_logic.process_player_action(user_info, action)
 
     except WebSocketDisconnect:
+        websocket_manager.disconnect(username)
+    except Exception as e:
+        logger.error(f"WebSocket error for {username}: {e}", exc_info=True)
         websocket_manager.disconnect(username)
 
 @api_router.websocket("/live/ws")

@@ -10,6 +10,22 @@ import json
 # --- Logging ---
 logger = logging.getLogger(__name__)
 
+# --- Echo Backend Detection ---
+# Echo routing is now handled by ai_service.py.
+# openai_client checks at call-time whether to delegate to echo_client.
+def _use_echo() -> bool:
+    try:
+        from . import echo_client
+        return echo_client.is_echo_enabled()
+    except Exception:
+        return False
+
+_echo_enabled = _use_echo()
+if _echo_enabled:
+    logger.info("AI后端: Echo Agent API (已配置并启用)")
+else:
+    logger.info("AI后端: OpenAI Compatible API")
+
 # --- 用户并发限制 ---
 MAX_CONCURRENT_REQUESTS_PER_USER = 2
 _user_semaphores: dict[str, asyncio.Semaphore] = {}
@@ -86,32 +102,21 @@ async def get_ai_response(
     user_id: str | None = None,
 ) -> str:
     """
-    从 OpenAI API 获取响应。
-
-    Args:
-        prompt: 用户的提示。
-        history: 对话的先前消息列表。
-        model: 使用的模型。
-        force_json: 是否强制返回JSON格式。
-        user_id: 用户ID，用于并发限制。
-
-    Returns:
-        AI 的响应消息，或错误字符串。
+    从 AI API 获取响应。自动选择 Echo 或 OpenAI 后端。
     """
+    if _echo_enabled:
+        from . import echo_client
+        return await echo_client.get_ai_response(
+            prompt=prompt, history=history, model=model,
+            force_json=force_json, user_id=user_id,
+        )
+
     if not client:
         return "错误：OpenAI客户端未初始化。请在 backend/.env 文件中正确设置您的 OPENAI_API_KEY。"
     
     # 用户并发限制
     if user_id:
         semaphore = await _get_user_semaphore(user_id)
-        if semaphore.locked() and semaphore._value == 0:
-            # 检查是否能立即获取，如果不能则说明已达上限
-            try:
-                # 尝试非阻塞获取
-                acquired = semaphore.locked()
-            except:
-                acquired = False
-        # 使用信号量包装后续逻辑
         async with semaphore:
             logger.debug(f"用户 {user_id} 获取LLM请求槽位，当前可用: {semaphore._value}")
             return await _get_ai_response_impl(prompt, history, model, force_json)
@@ -132,8 +137,8 @@ async def _get_ai_response_impl(
         messages.extend(history)
     messages.append({"role": "user", "content": prompt})
 
-    total_tokens = sum(len(m["content"]) for m in messages)
-    logger.debug(f"发送到OpenAI的消息总令牌数: {total_tokens}")
+    total_tokens = sum(len(m.get("content", "")) for m in messages)
+    logger.debug(f"发送到OpenAI的消息总令牌数(按字符估算): {total_tokens}")
 
     # 如果 token 过多，在 messages 副本上删除，不影响原始 history
     _max_loop = 10000
@@ -175,7 +180,8 @@ async def _get_ai_response_impl(
 
             if force_json:
                 try:
-                    json_part = json.loads(_extract_json_from_response(ret))
+                    from .game_logic import _robust_json_loads
+                    json_part = _robust_json_loads(_extract_json_from_response(ret) or "{}")
                     if json_part:
                         return ret
                     else:
@@ -206,6 +212,121 @@ async def _get_ai_response_impl(
             delay = base_delay * (2**attempt) + random.uniform(0, 1)
             await asyncio.sleep(delay)
 
+
+
+# --- Streaming AI Response ---
+async def get_ai_response_stream(
+    prompt: str,
+    history: list[dict] | None = None,
+    model=settings.OPENAI_MODEL,
+    user_id: str | None = None,
+):
+    """
+    流式获取 AI 响应。自动选择 Echo 或 OpenAI 后端。
+    """
+    if _echo_enabled:
+        from . import echo_client
+        async for chunk in echo_client.get_ai_response_stream(
+            prompt=prompt, history=history, model=model, user_id=user_id,
+        ):
+            yield chunk
+        return
+
+    if not client:
+        yield "错误：OpenAI客户端未初始化。"
+        return
+
+    if user_id:
+        semaphore = await _get_user_semaphore(user_id)
+        async with semaphore:
+            async for chunk in _get_ai_response_stream_impl(prompt, history, model):
+                yield chunk
+    else:
+        async for chunk in _get_ai_response_stream_impl(prompt, history, model):
+            yield chunk
+
+
+async def _get_ai_response_stream_impl(
+    prompt: str,
+    history: list[dict] | None = None,
+    model=settings.OPENAI_MODEL,
+):
+    """实际执行流式 AI 请求的内部函数"""
+
+    messages = []
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": prompt})
+
+    total_tokens = sum(len(m.get("content", "")) for m in messages)
+
+    _max_loop = 10000
+    while total_tokens > 100000 and _max_loop > 0:
+        if len(messages) <= 2:
+            break
+        random_id = random.randint(1, len(messages) - 2)
+        total_tokens -= len(messages[random_id]["content"])
+        messages.pop(random_id)
+        _max_loop -= 1
+
+    max_retries = 3
+    base_delay = 1
+
+    for attempt in range(max_retries):
+        _model = model
+        if "," in model:
+            model_options = [m.strip() for m in model.split(",") if m.strip()]
+            if model_options:
+                _model = model_options[0] if attempt == 0 else random.choice(model_options)
+        try:
+            stream = await client.chat.completions.create(
+                model=_model, messages=messages, stream=True
+            )
+            
+            full_content = ""
+            in_think_block = False
+            
+            async for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    text = delta.content
+                    full_content += text
+                    
+                    # 过滤 <think>...</think> 块
+                    if "<think>" in full_content and "</think>" not in full_content:
+                        in_think_block = True
+                        continue
+                    if in_think_block and "</think>" in full_content:
+                        in_think_block = False
+                        # 跳过 think 块内的所有内容
+                        think_end = full_content.rfind("</think>") + 8
+                        remaining = full_content[think_end:]
+                        if remaining.strip():
+                            yield remaining
+                        full_content = remaining
+                        continue
+                    if in_think_block:
+                        continue
+                    
+                    yield text
+            
+            return  # 成功完成流式响应
+
+        except APIError as e:
+            logger.error(f"流式 OpenAI API 错误 (尝试 {attempt + 1}/{max_retries}): {e}")
+            if attempt == max_retries - 1:
+                yield f"错误：AI服务出现问题。详情: {e}"
+                return
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+            await asyncio.sleep(delay)
+
+        except Exception as e:
+            logger.error(f"流式请求意外错误 (尝试 {attempt + 1}/{max_retries}): {e}", exc_info=True)
+            if attempt == max_retries - 1:
+                yield f"错误：发生意外错误。详情: {e}"
+                return
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+            await asyncio.sleep(delay)
 
 
 # --- Image Generation ---

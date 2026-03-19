@@ -37,9 +37,9 @@
 
 确保您的系统已安装以下软件：
 
-- **Python 3.8+**
+- **Python 3.10+**
 - **Git**
-- **uv** (推荐, 用于快速安装依赖):
+- **uv** (Linux 推荐, 用于快速安装依赖):
   ```bash
   pip install uv
   ```
@@ -122,23 +122,69 @@ pip install -r backend/requirements.txt
 
 ### 5. 运行应用
 
+#### 🐧 Linux / macOS
+
 提供了一个 `run.sh` 脚本来方便地启动应用。
 
-首先，给脚本添加执行权限：
 ```bash
 chmod +x run.sh
-```
-
-然后，运行脚本：
-```bash
 ./run.sh
 ```
+
+#### 🪟 Windows
+
+提供两种方式启动（任选其一）：
+
+**方式一：双击运行 (最简单)**
+
+直接双击项目根目录下的 `run_windows.bat` 文件。脚本会自动完成以下操作：
+1. 检测 Python 环境
+2. 创建虚拟环境 (`.venv`)
+3. 安装所有依赖
+4. 首次运行时自动从 `.env.example` 创建 `.env` 并提示编辑
+5. 启动服务器
+
+**方式二：PowerShell 运行 (更多选项)**
+
+在项目根目录打开 PowerShell 终端：
+```powershell
+# 基本启动
+powershell -ExecutionPolicy Bypass -File run_windows.ps1
+
+# 跳过虚拟环境创建和依赖安装 (加速启动)
+powershell -ExecutionPolicy Bypass -File run_windows.ps1 -SkipVenv -SkipInstall
+
+# 生产模式 (禁用热重载)
+powershell -ExecutionPolicy Bypass -File run_windows.ps1 -Production
+```
+
+**方式三：手动启动**
+
+```powershell
+# 1. 创建虚拟环境
+python -m venv .venv
+
+# 2. 激活虚拟环境
+.\.venv\Scripts\Activate.ps1
+
+# 3. 安装依赖
+pip install -r backend\requirements.txt
+
+# 4. 配置环境变量
+copy backend\.env.example backend\.env
+notepad backend\.env   # 编辑填入 API Key 等配置
+
+# 5. 启动服务器
+python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+---
 
 脚本会自动加载 `backend/.env` 文件中的环境变量，并使用 `uvicorn` 启动 FastAPI 服务器。
 
 服务器成功启动后，您应该会看到类似以下的输出：
 ```
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
 ```
 
 现在，在您的浏览器中打开 `http://localhost:8000` 即可开始游戏。
@@ -174,5 +220,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 │
 ├── .gitignore
 ├── README.md               # 本文档
-└── run.sh                  # 应用启动脚本
+├── run.sh                  # Linux/macOS 启动脚本
+├── run_windows.bat         # Windows 启动脚本 (双击运行)
+└── run_windows.ps1         # Windows 启动脚本 (PowerShell, 更多选项)
 ```

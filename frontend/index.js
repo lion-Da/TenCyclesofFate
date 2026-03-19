@@ -5,7 +5,42 @@ const API_BASE_URL = "/api";
 const appState = {
     gameState: null,
     lastRollEventId: null,  // 用于检测骰子事件变化
+    legacyData: null,       // 继承系统数据
 };
+
+// --- Streaming State ---
+const streamState = {
+    activeStreamId: null,       // 当前正在接收的流ID
+    streamBuffer: "",           // 已确认显示的文本
+    streamElement: null,        // 当前流式输出的DOM元素
+    streamRenderTimer: null,    // 流式渲染定时器
+    // --- Typewriter queue ---
+    typewriterQueue: "",        // 尚未显示的字符队列
+    typewriterTimer: null,      // 打字机定时器
+};
+
+// --- Stream Speed Settings ---
+// Speed levels: 0=instant, 1=fast, 2=medium, 3=slow, 4=very slow
+const SPEED_LABELS = ['瞬', '快', '适中', '慢', '极慢'];
+// [chars per tick, ms per tick]
+const SPEED_CONFIGS = [
+    [9999, 0],    // 0: instant — dump everything at once
+    [6, 20],      // 1: fast — 6 chars every 20ms ≈ 300 char/s
+    [3, 30],      // 2: medium — 3 chars every 30ms ≈ 100 char/s
+    [2, 50],      // 3: slow — 2 chars every 50ms ≈ 40 char/s
+    [1, 80],      // 4: very slow — 1 char every 80ms ≈ 12 char/s
+];
+
+function getStreamSpeed() {
+    const slider = document.getElementById('stream-speed');
+    if (slider) return parseInt(slider.value, 10);
+    const saved = localStorage.getItem('stream_speed');
+    return saved !== null ? parseInt(saved, 10) : 2;
+}
+
+function getSpeedConfig() {
+    return SPEED_CONFIGS[getStreamSpeed()] || SPEED_CONFIGS[2];
+}
 
 // --- Smooth Scroll State ---
 const scrollState = {
@@ -33,10 +68,25 @@ const DOMElements = {
     rollOverlay: document.getElementById('roll-overlay'),
     rollPanel: document.getElementById('roll-panel'),
     rollType: document.getElementById('roll-type'),
-    rollTarget: document.getElementById('roll-target'),
+    rollBreakdown: document.getElementById('roll-breakdown'),
+    breakdownItems: document.getElementById('breakdown-items'),
+    breakdownFinalRate: document.getElementById('breakdown-final-rate'),
+    rollDiceArea: document.getElementById('roll-dice-area'),
+    rollDiceNumber: document.getElementById('roll-dice-number'),
     rollResultDisplay: document.getElementById('roll-result-display'),
     rollOutcome: document.getElementById('roll-outcome'),
     rollValue: document.getElementById('roll-value'),
+    rollTarget: document.getElementById('roll-target'),
+    rollSides: document.getElementById('roll-sides'),
+    rollSummary: document.getElementById('roll-summary'),
+    legacyPanel: document.getElementById('legacy-panel'),
+    legacyPointsSpan: document.getElementById('legacy-points'),
+    legacyToggle: document.getElementById('legacy-toggle'),
+    blessingsList: document.getElementById('blessings-list'),
+    socialPanel: document.getElementById('social-panel'),
+    socialRelations: document.getElementById('social-relations'),
+    legacyCloseBtn: document.getElementById('legacy-close-btn'),
+    endGameButton: document.getElementById('end-game-button'),
 };
 
 // --- API Client ---
@@ -44,7 +94,6 @@ const api = {
     async initGame() {
         const response = await fetch(`${API_BASE_URL}/game/init`, {
             method: 'POST',
-            // No Authorization header needed, relies on HttpOnly cookie
         });
         if (response.status === 401) {
             throw new Error('Unauthorized');
@@ -55,7 +104,21 @@ const api = {
     async logout() {
         await fetch(`${API_BASE_URL}/logout`, { method: 'POST' });
         window.location.href = '/';
-    }
+    },
+    async getLegacy() {
+        const response = await fetch(`${API_BASE_URL}/legacy`);
+        if (!response.ok) return null;
+        return response.json();
+    },
+    async purchaseBlessing(blessingId) {
+        const response = await fetch(`${API_BASE_URL}/legacy/purchase`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ blessing_id: blessingId }),
+        });
+        if (!response.ok) return { success: false, message: '请求失败' };
+        return response.json();
+    },
 };
 
 // --- WebSocket Manager ---
@@ -69,18 +132,15 @@ const socketManager = {
             }
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host;
-            // The token is no longer in the URL; it's read from the cookie by the server.
             const wsUrl = `${protocol}//${host}${API_BASE_URL}/ws`;
             this.socket = new WebSocket(wsUrl);
-            this.socket.binaryType = 'arraybuffer'; // Important for receiving binary data
+            this.socket.binaryType = 'arraybuffer';
 
             this.socket.onopen = () => { console.log("WebSocket established."); resolve(); };
             this.socket.onmessage = (event) => {
                 let message;
-                // Check if the data is binary (ArrayBuffer)
                 if (event.data instanceof ArrayBuffer) {
                     try {
-                        // Decompress the gzip data using pako.ungzip
                         const decompressed = pako.ungzip(new Uint8Array(event.data), { to: 'string' });
                         message = JSON.parse(decompressed);
                     } catch (err) {
@@ -88,28 +148,36 @@ const socketManager = {
                         return;
                     }
                 } else {
-                    // Fallback for non-binary messages
                     message = JSON.parse(event.data);
                 }
                 
                 switch (message.type) {
                     case 'full_state':
                         appState.gameState = message.data;
-                        checkAndShowRollEvent();
                         render();
                         break;
                     case 'patch':
-                        // Apply JSON Patch
                         if (appState.gameState && message.patch) {
                             try {
                                 const result = jsonpatch.applyPatch(appState.gameState, message.patch, true, false);
                                 appState.gameState = result.newDocument;
-                                checkAndShowRollEvent();
                                 render();
                             } catch (err) {
                                 console.error('Failed to apply patch:', err);
                             }
                         }
+                        break;
+                    case 'roll_event':
+                        // Dedicated immediate roll event (bypasses debounce)
+                        if (message.data) {
+                            renderRollEvent(message.data);
+                        }
+                        break;
+                    case 'stream_chunk':
+                        handleStreamChunk(message);
+                        break;
+                    case 'stream_end':
+                        handleStreamEnd(message);
                         break;
                     case 'error':
                         alert(`WebSocket Error: ${message.detail}`);
@@ -128,6 +196,122 @@ const socketManager = {
         }
     }
 };
+
+// --- Streaming Handlers ---
+function handleStreamChunk(message) {
+    const { stream_id, content } = message;
+    
+    // 如果是新的流，创建新的DOM元素并启动打字机
+    if (streamState.activeStreamId !== stream_id) {
+        // 清理上一个流的残留
+        _stopTypewriter();
+        
+        streamState.activeStreamId = stream_id;
+        streamState.streamBuffer = "";
+        streamState.typewriterQueue = "";
+        
+        // 创建流式输出容器
+        const streamDiv = document.createElement('div');
+        streamDiv.classList.add('stream-narrative');
+        streamDiv.id = `stream-${stream_id}`;
+        DOMElements.narrativeWindow.appendChild(streamDiv);
+        streamState.streamElement = streamDiv;
+        
+        _startTypewriter();
+    }
+    
+    // 追加到待显示队列
+    streamState.typewriterQueue += content;
+}
+
+function _startTypewriter() {
+    if (streamState.typewriterTimer) return;
+    
+    const tick = () => {
+        if (!streamState.typewriterQueue && !streamState.activeStreamId) {
+            // 队列空且流已结束，停止
+            _stopTypewriter();
+            return;
+        }
+        
+        if (streamState.typewriterQueue) {
+            const [charsPerTick] = getSpeedConfig();
+            const take = Math.min(charsPerTick, streamState.typewriterQueue.length);
+            const chars = streamState.typewriterQueue.slice(0, take);
+            streamState.typewriterQueue = streamState.typewriterQueue.slice(take);
+            streamState.streamBuffer += chars;
+            
+            _renderStreamBuffer();
+        }
+        
+        // 重新调度（速度可能已变化）
+        const [, msPerTick] = getSpeedConfig();
+        if (msPerTick === 0) {
+            // Instant mode: drain everything
+            streamState.streamBuffer += streamState.typewriterQueue;
+            streamState.typewriterQueue = "";
+            _renderStreamBuffer();
+            // 继续轮询以等待后续chunks
+            streamState.typewriterTimer = setTimeout(tick, 50);
+        } else {
+            streamState.typewriterTimer = setTimeout(tick, msPerTick);
+        }
+    };
+    
+    tick();
+}
+
+function _stopTypewriter() {
+    if (streamState.typewriterTimer) {
+        clearTimeout(streamState.typewriterTimer);
+        streamState.typewriterTimer = null;
+    }
+}
+
+function _renderStreamBuffer() {
+    if (!streamState.streamElement) return;
+    
+    // 使用节流渲染，避免频繁DOM更新
+    if (!streamState.streamRenderTimer) {
+        streamState.streamRenderTimer = requestAnimationFrame(() => {
+            if (streamState.streamElement) {
+                streamState.streamElement.innerHTML = renderMarkdownSafe(streamState.streamBuffer);
+                // 自动滚动
+                if (!scrollState.isUserScrolling) {
+                    DOMElements.narrativeWindow.scrollTop = DOMElements.narrativeWindow.scrollHeight;
+                }
+            }
+            streamState.streamRenderTimer = null;
+        });
+    }
+}
+
+function handleStreamEnd(message) {
+    const { stream_id } = message;
+    
+    if (streamState.activeStreamId === stream_id) {
+        // 将剩余队列全部flush到buffer
+        if (streamState.typewriterQueue) {
+            streamState.streamBuffer += streamState.typewriterQueue;
+            streamState.typewriterQueue = "";
+        }
+        
+        // 最终渲染
+        if (streamState.streamElement) {
+            streamState.streamElement.innerHTML = renderMarkdownSafe(streamState.streamBuffer);
+        }
+        
+        // 清除流式状态
+        _stopTypewriter();
+        streamState.activeStreamId = null;
+        streamState.streamBuffer = "";
+        streamState.streamElement = null;
+        if (streamState.streamRenderTimer) {
+            cancelAnimationFrame(streamState.streamRenderTimer);
+            streamState.streamRenderTimer = null;
+        }
+    }
+}
 
 // --- UI & Rendering ---
 function showView(viewId) {
@@ -153,33 +337,28 @@ function stopSmoothScroll() {
 }
 
 function smoothScrollToBottom(element, pixelsPerSecond = 150) {
-    // 停止之前的滚动动画
     stopSmoothScroll();
     
-    // 如果用户正在手动滚动，不启动自动滚动
     if (scrollState.isUserScrolling) {
         return;
     }
     
     const startScrollTop = element.scrollTop;
-    const minScrollDistance = 50; // 最小滚动距离阈值
+    const minScrollDistance = 50;
     
     function tryStartScroll(retryCount = 0) {
         const targetScrollTop = element.scrollHeight - element.clientHeight;
         const distance = targetScrollTop - startScrollTop;
         
-        // 如果滚动空间太小，等待内容加载（最多等1秒，每100ms检查一次）
         if (distance < minScrollDistance && retryCount < 10) {
             setTimeout(() => tryStartScroll(retryCount + 1), 100);
             return;
         }
         
-        // 如果等了1秒还是没有足够的滚动空间，放弃
         if (distance <= 0) {
             return;
         }
         
-        // 再次检查用户是否开始手动滚动
         if (scrollState.isUserScrolling) {
             return;
         }
@@ -213,23 +392,19 @@ function smoothScrollToBottom(element, pixelsPerSecond = 150) {
 }
 
 function setupScrollInterruptListener(element) {
-    // 检测用户滚轮滚动
     element.addEventListener('wheel', () => {
         scrollState.isUserScrolling = true;
         stopSmoothScroll();
         
-        // 清除之前的超时
         if (scrollState.scrollTimeout) {
             clearTimeout(scrollState.scrollTimeout);
         }
         
-        // 2秒后重置用户滚动状态，允许下次自动滚动
         scrollState.scrollTimeout = setTimeout(() => {
             scrollState.isUserScrolling = false;
         }, 2000);
     }, { passive: true });
     
-    // 检测触摸滚动
     element.addEventListener('touchstart', () => {
         scrollState.isUserScrolling = true;
         stopSmoothScroll();
@@ -246,18 +421,15 @@ function setupScrollInterruptListener(element) {
 }
 
 function showLoading(isLoading) {
-    // 只在初始化时显示全屏加载（gameState 为空时）
     const showFullscreenSpinner = isLoading && !appState.gameState;
     DOMElements.loadingSpinner.style.display = showFullscreenSpinner ? 'flex' : 'none';
     
     const isProcessing = appState.gameState ? appState.gameState.is_processing : false;
     const buttonsDisabled = isLoading || isProcessing;
-    // DOMElements.loginButton is removed
     DOMElements.actionInput.disabled = buttonsDisabled;
     DOMElements.actionButton.disabled = buttonsDisabled;
     DOMElements.startTrialButton.disabled = buttonsDisabled;
     
-    // 在按钮上显示加载状态
     if (buttonsDisabled && appState.gameState) {
         DOMElements.actionButton.textContent = '⏳';
     } else {
@@ -279,8 +451,14 @@ function render() {
         else if (text.startsWith('【')) p.classList.add('system-message');
         historyContainer.appendChild(p);
     });
+    
+    // 保留流式元素（如果正在流式输出）
+    const activeStreamEl = streamState.streamElement;
     DOMElements.narrativeWindow.innerHTML = '';
     DOMElements.narrativeWindow.appendChild(historyContainer);
+    if (activeStreamEl && streamState.activeStreamId) {
+        DOMElements.narrativeWindow.appendChild(activeStreamEl);
+    }
     
     // 首次渲染直接跳到底部，之后使用平滑滚动
     if (scrollState.isFirstRender) {
@@ -294,6 +472,18 @@ function render() {
     DOMElements.actionInput.parentElement.classList.toggle('hidden', !(is_in_trial || daily_success_achieved || opportunities_remaining < 0));
     const startButton = DOMElements.startTrialButton;
     startButton.classList.toggle('hidden', is_in_trial || daily_success_achieved || opportunities_remaining < 0);
+
+    // 结束试炼按钮: 仅在试炼中且非处理中时可见
+    if (DOMElements.endGameButton) {
+        DOMElements.endGameButton.classList.toggle('hidden', !is_in_trial);
+        DOMElements.endGameButton.disabled = appState.gameState.is_processing;
+    }
+
+    // 显示/隐藏继承系统按钮: 不在试炼中、有机缘且未完成时可见
+    if (DOMElements.legacyToggle) {
+        const showLegacy = !is_in_trial && !daily_success_achieved && opportunities_remaining > 0;
+        DOMElements.legacyToggle.classList.toggle('hidden', !showLegacy);
+    }
 
     if (daily_success_achieved) {
          startButton.textContent = "今日功德圆满";
@@ -326,7 +516,6 @@ function renderValue(container, value, level = 0) {
             keySpan.textContent = `${key}: `;
             propDiv.appendChild(keySpan);
 
-            // Recursively render the value
             renderValue(propDiv, val, level + 1);
             subContainer.appendChild(propDiv);
         });
@@ -342,14 +531,18 @@ function renderValue(container, value, level = 0) {
 function renderCharacterStatus() {
     const { current_life } = appState.gameState;
     const container = DOMElements.characterStatus;
-    container.innerHTML = ''; // Clear previous content
+    container.innerHTML = '';
 
     if (!current_life) {
         container.textContent = '静待天命...';
+        renderSocialRelations(null);
         return;
     }
 
     Object.entries(current_life).forEach(([key, value]) => {
+        // 人物关系由专门的面板渲染，跳过
+        if (key === '人物关系') return;
+
         const details = document.createElement('details');
         const summary = document.createElement('summary');
         summary.textContent = key;
@@ -363,26 +556,281 @@ function renderCharacterStatus() {
         details.appendChild(content);
         container.appendChild(details);
     });
+
+    renderSocialRelations(current_life);
 }
 
-function checkAndShowRollEvent() {
-    const rollEvent = appState.gameState?.roll_event;
-    if (rollEvent && rollEvent.id && rollEvent.id !== appState.lastRollEventId) {
-        appState.lastRollEventId = rollEvent.id;
-        renderRollEvent(rollEvent);
+function renderSocialRelations(currentLife) {
+    const panel = DOMElements.socialPanel;
+    const container = DOMElements.socialRelations;
+    if (!panel || !container) return;
+
+    const npcs = currentLife ? currentLife['人物关系'] : null;
+    if (!npcs || typeof npcs !== 'object' || Object.keys(npcs).length === 0) {
+        panel.classList.add('hidden');
+        return;
     }
+
+    panel.classList.remove('hidden');
+    container.innerHTML = '';
+
+    // 按好感度排序
+    const sorted = Object.entries(npcs).sort(
+        ([, a], [, b]) => (b['好感度'] || 0) - (a['好感度'] || 0)
+    );
+
+    // Helper to escape HTML entities to prevent XSS from AI-generated NPC data
+    const esc = (str) => {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    };
+
+    sorted.forEach(([name, npc]) => {
+        if (!npc || typeof npc !== 'object') return;
+
+        const score = npc['好感度'] || 0;
+        const stage = npc['关系阶段'] || '陌生';
+        const personality = npc['性格'] || '';
+        const identity = npc['身份'] || '';
+        const marks = npc['特殊标记'] || [];
+
+        const card = document.createElement('div');
+        card.classList.add('social-npc-card');
+        card.classList.add(`social-tier-${getAffinityTier(score)}`);
+
+        // 好感度条颜色
+        const barPercent = Math.min(100, Math.abs(score));
+        const barColor = score >= 60 ? '#e8b84b' :
+                         score >= 20 ? '#6a8b6a' :
+                         score >= 0  ? '#888' :
+                         score >= -40 ? '#a08060' : '#a8453c';
+
+        const marksHtml = marks.length > 0
+            ? `<span class="social-marks">${marks.map(m => `【${esc(String(m))}】`).join('')}</span>`
+            : '';
+
+        card.innerHTML = `
+            <div class="social-npc-header">
+                <span class="social-npc-name">${esc(String(name))}</span>
+                <span class="social-npc-stage">${esc(String(stage))}</span>
+            </div>
+            <div class="social-npc-info">
+                ${identity ? `<span class="social-npc-identity">${esc(String(identity))}</span>` : ''}
+                ${personality ? `<span class="social-npc-personality">${esc(String(personality))}</span>` : ''}
+                ${marksHtml}
+            </div>
+            <div class="social-affinity-bar-container">
+                <div class="social-affinity-bar" style="width:${barPercent}%;background:${barColor}"></div>
+                <span class="social-affinity-score">${score > 0 ? '+' : ''}${score}</span>
+            </div>
+        `;
+
+        container.appendChild(card);
+    });
+}
+
+function getAffinityTier(score) {
+    if (score >= 80) return 'sworn';
+    if (score >= 60) return 'close';
+    if (score >= 40) return 'friend';
+    if (score >= 20) return 'acquaintance';
+    if (score >= -20) return 'stranger';
+    if (score >= -60) return 'hostile';
+    return 'nemesis';
 }
 
 function renderRollEvent(rollEvent) {
-    DOMElements.rollType.textContent = `判定: ${rollEvent.type}`;
-    DOMElements.rollTarget.textContent = `(<= ${rollEvent.target})`;
-    DOMElements.rollOutcome.textContent = rollEvent.outcome;
-    DOMElements.rollOutcome.className = `outcome-${rollEvent.outcome}`;
-    DOMElements.rollValue.textContent = rollEvent.result;
+    // ── Phase 1: Show overlay + type + breakdown (immediate) ──
+    DOMElements.rollType.textContent = `⚔ ${rollEvent.type}`;
     DOMElements.rollResultDisplay.classList.add('hidden');
+    DOMElements.rollDiceNumber.classList.add('hidden');
+    DOMElements.rollBreakdown.classList.add('hidden');
+
+    // Reset dice animation
+    const diceCup = DOMElements.rollDiceArea.querySelector('.dice-cup');
+    if (diceCup) {
+        diceCup.style.display = '';
+        diceCup.style.animation = 'none';
+        void diceCup.offsetHeight; // trigger reflow
+        diceCup.style.animation = '';
+    }
+
     DOMElements.rollOverlay.classList.remove('hidden');
-    setTimeout(() => DOMElements.rollResultDisplay.classList.remove('hidden'), 1000);
-    setTimeout(() => DOMElements.rollOverlay.classList.add('hidden'), 3000);
+
+    // ── Phase 2: Animate breakdown items (staggered) ──
+    const breakdown = rollEvent.breakdown || {};
+    const items = [];
+
+    // Base rate
+    items.push({ label: '基础成功率', value: `${breakdown.base_rate ?? rollEvent.original_target ?? '?'}%`, cls: 'neutral', isBase: true });
+
+    // Attribute bonus
+    if (breakdown.attribute_bonus && breakdown.attribute_bonus !== 0) {
+        const attrName = breakdown.attribute_name || '属性';
+        const attrVal = breakdown.attribute_value != null ? `(${attrName}:${breakdown.attribute_value})` : `(${attrName})`;
+        items.push({
+            label: `属性加成 ${attrVal}`,
+            value: `${breakdown.attribute_bonus > 0 ? '+' : ''}${breakdown.attribute_bonus}%`,
+            cls: breakdown.attribute_bonus > 0 ? 'positive' : 'negative'
+        });
+    }
+
+    // Item bonus
+    if (breakdown.item_bonus && breakdown.item_bonus !== 0) {
+        items.push({
+            label: '道具加成',
+            value: `${breakdown.item_bonus > 0 ? '+' : ''}${breakdown.item_bonus}%`,
+            cls: breakdown.item_bonus > 0 ? 'positive' : 'negative'
+        });
+    }
+
+    // Status bonus
+    if (breakdown.status_bonus && breakdown.status_bonus !== 0) {
+        items.push({
+            label: '状态修正',
+            value: `${breakdown.status_bonus > 0 ? '+' : ''}${breakdown.status_bonus}%`,
+            cls: breakdown.status_bonus > 0 ? 'positive' : 'negative'
+        });
+    }
+
+    // Legacy bonus
+    if (breakdown.legacy_bonus && breakdown.legacy_bonus !== 0) {
+        items.push({
+            label: '功德加成',
+            value: `+${breakdown.legacy_bonus}%`,
+            cls: 'positive'
+        });
+    }
+
+    // Render breakdown
+    DOMElements.breakdownItems.innerHTML = '';
+    items.forEach((item, index) => {
+        const el = document.createElement('div');
+        el.className = `breakdown-item${item.isBase ? ' base-item' : ''}`;
+        el.style.animationDelay = `${index * 150}ms`;
+        el.innerHTML = `<span class="label">${item.label}</span><span class="value ${item.cls}">${item.value}</span>`;
+        DOMElements.breakdownItems.appendChild(el);
+    });
+    DOMElements.breakdownFinalRate.textContent = breakdown.final_rate ?? '?';
+    
+    // Show breakdown with slight delay
+    setTimeout(() => {
+        DOMElements.rollBreakdown.classList.remove('hidden');
+    }, 200);
+
+    // ── Phase 3: Show dice number (after breakdown animation) ──
+    const breakdownDuration = 200 + items.length * 150 + 500; // wait for all items + pause
+
+    setTimeout(() => {
+        // Hide dice emoji, show number
+        if (diceCup) diceCup.style.display = 'none';
+        DOMElements.rollDiceNumber.textContent = rollEvent.result;
+        DOMElements.rollDiceNumber.classList.remove('hidden');
+        // Re-trigger animation
+        DOMElements.rollDiceNumber.style.animation = 'none';
+        void DOMElements.rollDiceNumber.offsetHeight;
+        DOMElements.rollDiceNumber.style.animation = '';
+    }, breakdownDuration);
+
+    // ── Phase 4: Show final result (after dice number) ──
+    setTimeout(() => {
+        DOMElements.rollOutcome.textContent = rollEvent.outcome;
+        DOMElements.rollOutcome.className = `outcome-${rollEvent.outcome}`;
+        DOMElements.rollSides.textContent = rollEvent.sides || 100;
+        DOMElements.rollValue.textContent = rollEvent.result;
+        DOMElements.rollTarget.textContent = rollEvent.target;
+        DOMElements.rollResultDisplay.classList.remove('hidden');
+    }, breakdownDuration + 600);
+
+    // ── Phase 5: Auto-hide overlay ──
+    setTimeout(() => {
+        DOMElements.rollOverlay.classList.add('hidden');
+    }, breakdownDuration + 600 + 3000);
+}
+
+// --- Legacy System UI ---
+async function loadLegacyData() {
+    const data = await api.getLegacy();
+    if (data) {
+        appState.legacyData = data;
+        renderLegacyPanel();
+    }
+}
+
+function renderLegacyPanel() {
+    const data = appState.legacyData;
+    if (!data || !DOMElements.legacyPanel) return;
+
+    if (DOMElements.legacyPointsSpan) {
+        DOMElements.legacyPointsSpan.textContent = data.legacy_points || 0;
+    }
+
+    const list = DOMElements.blessingsList;
+    if (!list) return;
+    list.innerHTML = '';
+
+    const activeSet = new Set(data.active_blessings || []);
+
+    (data.available_blessings || []).forEach(blessing => {
+        const item = document.createElement('div');
+        item.classList.add('blessing-item');
+
+        const isActive = activeSet.has(blessing.id);
+        const canAfford = data.legacy_points >= blessing.cost;
+
+        item.innerHTML = `
+            <div class="blessing-header">
+                <span class="blessing-name">${blessing.name}</span>
+                <span class="blessing-cost">${blessing.cost} 功德</span>
+            </div>
+            <div class="blessing-desc">${blessing.description}</div>
+            <div class="blessing-category">${blessing.category}</div>
+        `;
+
+        const btn = document.createElement('button');
+        btn.classList.add('blessing-btn');
+        if (isActive) {
+            btn.textContent = '已激活';
+            btn.disabled = true;
+            btn.classList.add('active');
+        } else if (!canAfford) {
+            btn.textContent = '功德不足';
+            btn.disabled = true;
+            btn.classList.add('disabled');
+        } else {
+            btn.textContent = '兑换';
+            btn.addEventListener('click', async () => {
+                btn.disabled = true;
+                btn.textContent = '兑换中...';
+                const result = await api.purchaseBlessing(blessing.id);
+                if (result.success) {
+                    btn.textContent = '已激活';
+                    btn.classList.add('active');
+                    // 刷新数据
+                    await loadLegacyData();
+                } else {
+                    btn.textContent = result.message || '兑换失败';
+                    setTimeout(() => {
+                        btn.textContent = '兑换';
+                        btn.disabled = false;
+                    }, 2000);
+                }
+            });
+        }
+
+        item.appendChild(btn);
+        list.appendChild(item);
+    });
+}
+
+function toggleLegacyPanel() {
+    if (!DOMElements.legacyPanel) return;
+    const isHidden = DOMElements.legacyPanel.classList.contains('hidden');
+    DOMElements.legacyPanel.classList.toggle('hidden');
+    if (isHidden) {
+        loadLegacyData();
+    }
 }
 
 // --- Fullscreen Management ---
@@ -408,16 +856,23 @@ function handleAction(actionOverride = null) {
     const action = actionOverride || DOMElements.actionInput.value.trim();
     if (!action) return;
 
-    // Special case for starting a trial to prevent getting locked out by is_processing flag
-    if (action === "开始试炼") {
-        // Allow starting a new trial even if the previous async task is in its finally block
+    const actionBase = action.split(":")[0].trim();
+    if (actionBase === "开始试炼" || actionBase === "主动结束试炼") {
+        // Allow starting/ending a trial even if the previous async task is in its finally block
     } else {
-        // For all other actions, prevent sending if another action is in flight.
         if (appState.gameState && appState.gameState.is_processing) return;
     }
 
     DOMElements.actionInput.value = '';
     socketManager.sendAction(action);
+}
+
+function showCompanionChoice() {
+    // Show the companion choice dialog before starting a trial
+    const dialog = document.getElementById('companion-dialog');
+    if (dialog) {
+        dialog.classList.remove('hidden');
+    }
 }
 
 // --- Initialization ---
@@ -429,36 +884,222 @@ async function initializeGame() {
         render();
         showView('game-view');
         await socketManager.connect();
+        
+        // 加载继承系统数据
+        loadLegacyData();
+        
         console.log("Initialization complete and WebSocket is ready.");
     } catch (error) {
-        // If init fails (e.g. no valid cookie), just show the login view.
-        // The api.initGame function no longer redirects, it just throws an error.
         showView('login-view');
         if (error.message !== 'Unauthorized') {
              console.error(`Session initialization failed: ${error.message}`);
         }
     } finally {
-        // Ensure spinner is hidden regardless of outcome
         showLoading(false);
     }
 }
 
 function init() {
-    // Always try to initialize the game on page load.
-    // If the user is logged in, it will show the game view.
-    // If not, the catch block in initializeGame will handle showing the login view.
     initializeGame();
 
-    // Setup scroll interrupt listener
     setupScrollInterruptListener(DOMElements.narrativeWindow);
 
-    // Setup event listeners regardless of initial view
     DOMElements.logoutButton.addEventListener('click', handleLogout);
     DOMElements.fullscreenButton.addEventListener('click', toggleFullscreen);
+
+    // 结束试炼按钮
+    if (DOMElements.endGameButton) {
+        DOMElements.endGameButton.addEventListener('click', () => {
+            if (confirm('确定要结束当前试炼吗？\n\n主动结束将放弃本次试炼中的所有灵石，但仍可获得功德点（取决于当前境界）。\n此操作不可撤销。')) {
+                handleAction('主动结束试炼');
+            }
+        });
+    }
+    
+    // 文字速度滑块
+    const speedSlider = document.getElementById('stream-speed');
+    const speedText = document.getElementById('speed-text');
+    if (speedSlider && speedText) {
+        // 从 localStorage 恢复用户偏好
+        const savedSpeed = localStorage.getItem('stream_speed');
+        if (savedSpeed !== null) {
+            speedSlider.value = savedSpeed;
+        }
+        speedText.textContent = SPEED_LABELS[parseInt(speedSlider.value, 10)] || '适中';
+        
+        speedSlider.addEventListener('input', () => {
+            const val = parseInt(speedSlider.value, 10);
+            speedText.textContent = SPEED_LABELS[val] || '适中';
+            localStorage.setItem('stream_speed', val);
+        });
+    }
     DOMElements.actionButton.addEventListener('click', () => handleAction());
     DOMElements.actionInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAction(); });
-    DOMElements.startTrialButton.addEventListener('click', () => handleAction("开始试炼"));
+    DOMElements.startTrialButton.addEventListener('click', () => showCompanionChoice());
+    
+    // Difficulty selection buttons
+    document.querySelectorAll('.difficulty-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.difficulty-btn').forEach(b => b.classList.remove('selected'));
+            btn.classList.add('selected');
+        });
+    });
+
+    // Helper: get currently selected difficulty
+    function getSelectedDifficulty() {
+        const sel = document.querySelector('.difficulty-btn.selected');
+        return sel ? sel.dataset.difficulty : '凡人修仙';
+    }
+
+    // Companion choice buttons (now include difficulty)
+    document.getElementById('btn-companion-solo')?.addEventListener('click', () => {
+        document.getElementById('companion-dialog').classList.add('hidden');
+        handleAction(`开始试炼:独行:${getSelectedDifficulty()}`);
+    });
+    document.getElementById('btn-companion-party')?.addEventListener('click', () => {
+        document.getElementById('companion-dialog').classList.add('hidden');
+        handleAction(`开始试炼:同行:${getSelectedDifficulty()}`);
+    });
+    
+    // 继承系统按钮
+    if (DOMElements.legacyToggle) {
+        DOMElements.legacyToggle.addEventListener('click', toggleLegacyPanel);
+    }
+    // 关闭按钮
+    if (DOMElements.legacyCloseBtn) {
+        DOMElements.legacyCloseBtn.addEventListener('click', toggleLegacyPanel);
+    }
+    // 点击遮罩层背景也关闭
+    if (DOMElements.legacyPanel) {
+        DOMElements.legacyPanel.addEventListener('click', (e) => {
+            if (e.target === DOMElements.legacyPanel) toggleLegacyPanel();
+        });
+    }
 }
+
+// --- Email Auth Functions ---
+function switchAuthTab(tab) {
+    document.querySelectorAll('.auth-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+    document.querySelectorAll('.auth-form').forEach(f => f.classList.remove('active'));
+    document.getElementById(`auth-${tab}`).classList.add('active');
+}
+
+async function handleSendCode() {
+    const email = document.getElementById('register-email').value.trim();
+    const btn = document.getElementById('send-code-btn');
+    const errorEl = document.getElementById('login-error');
+    errorEl.textContent = '';
+
+    if (!email || !email.includes('@')) {
+        errorEl.textContent = '请输入有效的邮箱地址';
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '发送中...';
+
+    try {
+        const resp = await fetch(`${API_BASE_URL}/auth/send-code`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, purpose: 'register' }),
+        });
+        const data = await resp.json();
+
+        if (data.success) {
+            // Start countdown
+            let countdown = 60;
+            btn.textContent = `${countdown}s`;
+            const timer = setInterval(() => {
+                countdown--;
+                btn.textContent = `${countdown}s`;
+                if (countdown <= 0) {
+                    clearInterval(timer);
+                    btn.disabled = false;
+                    btn.textContent = '发送验证码';
+                }
+            }, 1000);
+        } else {
+            errorEl.textContent = data.message || '发送失败';
+            btn.disabled = false;
+            btn.textContent = '发送验证码';
+        }
+    } catch (e) {
+        errorEl.textContent = '网络错误，请重试';
+        btn.disabled = false;
+        btn.textContent = '发送验证码';
+    }
+}
+
+async function handleEmailRegister() {
+    const email = document.getElementById('register-email').value.trim();
+    const code = document.getElementById('register-code').value.trim();
+    const password = document.getElementById('register-password').value;
+    const errorEl = document.getElementById('login-error');
+    errorEl.textContent = '';
+
+    if (!email || !code || !password) {
+        errorEl.textContent = '请填写所有字段';
+        return;
+    }
+
+    try {
+        const resp = await fetch(`${API_BASE_URL}/auth/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password, code }),
+        });
+        const data = await resp.json();
+
+        if (data.success) {
+            errorEl.style.color = '#6a8b6a';
+            errorEl.textContent = '注册成功！正在跳转登录...';
+            switchAuthTab('login');
+            document.getElementById('login-email').value = email;
+            setTimeout(() => { errorEl.textContent = ''; errorEl.style.color = ''; }, 2000);
+        } else {
+            errorEl.textContent = data.message || '注册失败';
+        }
+    } catch (e) {
+        errorEl.textContent = '网络错误，请重试';
+    }
+}
+
+async function handleEmailLogin() {
+    const email = document.getElementById('login-email').value.trim();
+    const password = document.getElementById('login-password').value;
+    const errorEl = document.getElementById('login-error');
+    errorEl.textContent = '';
+
+    if (!email || !password) {
+        errorEl.textContent = '请填写邮箱和密码';
+        return;
+    }
+
+    try {
+        const resp = await fetch(`${API_BASE_URL}/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password }),
+        });
+        const data = await resp.json();
+
+        if (data.success) {
+            // Cookie is set by server, just reload
+            window.location.reload();
+        } else {
+            errorEl.textContent = data.message || '登录失败';
+        }
+    } catch (e) {
+        errorEl.textContent = '网络错误，请重试';
+    }
+}
+
+// Make switchAuthTab available globally for onclick handlers in HTML
+window.switchAuthTab = switchAuthTab;
+window.handleSendCode = handleSendCode;
+window.handleEmailRegister = handleEmailRegister;
+window.handleEmailLogin = handleEmailLogin;
 
 // --- Start the App ---
 init();

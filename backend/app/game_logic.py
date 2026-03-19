@@ -10,7 +10,9 @@ from datetime import date
 from pathlib import Path
 from fastapi import HTTPException, status
 
-from . import state_manager, openai_client, cheat_check, redemption
+from . import state_manager, cheat_check, redemption
+from . import dice_system, legacy_system, social_system
+from . import ai_service
 from .websocket_manager import manager as websocket_manager
 from .config import settings
 
@@ -20,6 +22,87 @@ logger = logging.getLogger(__name__)
 # --- Game Constants ---
 INITIAL_OPPORTUNITIES = 10
 REWARD_SCALING_FACTOR = 500000  # Previously LOGARITHM_CONSTANT_C
+
+# --- Difficulty Presets ---
+# Each difficulty defines:
+#   roll_modifier: added to base_target (percentage points) before roll
+#   attr_min / attr_max: clamp range for initial attributes (None = no clamp)
+#   auto_success: if True, all rolls are forced to succeed
+#   legacy_multiplier: multiplier for legacy points earned at endgame
+DIFFICULTY_PRESETS = {
+    "气运之父": {
+        "roll_modifier": None,       # not used — auto_success overrides
+        "auto_success": True,
+        "attr_min": 60,
+        "attr_max": None,
+        "legacy_multiplier": 0.0,    # 无法获得继承点
+        "label": "气运之父",
+        "description": "Roll点必成功，属性下限60，无法获得继承点",
+    },
+    "气运之子": {
+        "roll_modifier": 50,         # target +50% of sides (绝对值)
+        "auto_success": False,
+        "attr_min": 50,
+        "attr_max": 80,
+        "legacy_multiplier": 0.5,
+        "label": "气运之子",
+        "description": "Roll成功率+50%，属性50-80，继承点×0.5",
+    },
+    "凡人修仙": {
+        "roll_modifier": 0,
+        "auto_success": False,
+        "attr_min": None,
+        "attr_max": None,
+        "legacy_multiplier": 1.0,
+        "label": "凡人修仙",
+        "description": "正常模式",
+    },
+    "绝处逢生": {
+        "roll_modifier": -25,        # target -25% of sides (绝对值)
+        "auto_success": False,
+        "attr_min": None,
+        "attr_max": 30,
+        "legacy_multiplier": 1.5,
+        "label": "绝处逢生",
+        "description": "Roll成功率-25%，属性上限30，继承点×1.5",
+    },
+}
+DEFAULT_DIFFICULTY = "凡人修仙"
+
+
+def _get_difficulty_preset(session: dict) -> dict:
+    """Get the difficulty preset for a session, defaulting to 凡人修仙."""
+    name = session.get("difficulty", DEFAULT_DIFFICULTY)
+    return DIFFICULTY_PRESETS.get(name, DIFFICULTY_PRESETS[DEFAULT_DIFFICULTY])
+
+
+def _clamp_attributes(current_life: dict, preset: dict) -> dict:
+    """
+    Clamp all numeric attributes in current_life.属性 according to difficulty preset.
+    Returns modified current_life (in-place).
+    """
+    attributes = current_life.get("属性")
+    if not attributes or not isinstance(attributes, dict):
+        return current_life
+
+    attr_min = preset.get("attr_min")
+    attr_max = preset.get("attr_max")
+
+    if attr_min is None and attr_max is None:
+        return current_life
+
+    for key in attributes:
+        try:
+            val = int(attributes[key])
+            if attr_min is not None:
+                val = max(val, attr_min)
+            if attr_max is not None:
+                val = min(val, attr_max)
+            attributes[key] = val
+        except (ValueError, TypeError):
+            continue
+
+    return current_life
 
 # --- Image Generation State ---
 # 记录每个玩家的最后活动时间，用于判断是否触发图片生成
@@ -117,7 +200,7 @@ async def _delayed_image_generation(player_id: str, trigger_time: float):
         logger.info(f"开始为玩家 {player_id} 生成场景图片")
         
         # 调用图片生成
-        image_data_url = await openai_client.generate_image(scene_prompt, user_id=player_id)
+        image_data_url = await ai_service.generate_image(scene_prompt, user_id=player_id)
         
         if image_data_url:
             # 重新获取最新的 session（可能在生成期间有变化）
@@ -157,7 +240,7 @@ def _schedule_image_generation(player_id: str, trigger_time: float):
     调度图片生成任务。
     如果已有待处理的任务，先取消它。
     """
-    if not openai_client.is_image_gen_enabled():
+    if not ai_service.is_image_gen_enabled():
         return
     
     # 取消之前的任务（如果有）
@@ -179,12 +262,56 @@ async def get_or_create_daily_session(current_user: dict) -> dict:
     today_str = date.today().isoformat()
     session = await state_manager.get_session(player_id)
     if session and session.get("session_date") == today_str:
+        dirty = False
+
         if session.get("is_processing"):
             session["is_processing"] = False
-        await state_manager.save_session(player_id, session)
+            dirty = True
 
         if session.get("daily_success_achieved") and not session.get("redemption_code"):
             session["daily_success_achieved"] = False
+            dirty = True
+
+        # ── 重连清理：若当前不在试炼中，清除上次失败/结束试炼残留的历史 ──
+        # 玩家登出重登时，如果 is_in_trial==False 且 current_life==None，
+        # 说明没有正在进行的试炼。此时 display_history 中可能残留上次失败的
+        # 叙事和错误信息，应该清理掉，只保留欢迎横幅 + 一条状态提示。
+        # 但如果玩家今天已经成功（有兑换码），保留完整历史让他能看到兑换码。
+        if (not session.get("is_in_trial")
+            and session.get("current_life") is None
+            and not session.get("daily_success_achieved")
+            and not session.get("redemption_code")):
+            display_hist = session.get("display_history", [])
+            # 只保留第一条（欢迎横幅），丢弃其余残留内容
+            welcome = display_hist[0] if display_hist else ""
+            opps = session.get("opportunities_remaining", INITIAL_OPPORTUNITIES)
+            if opps < INITIAL_OPPORTUNITIES:
+                # 之前有过试炼但失败了，给一个简要提示
+                status_msg = (
+                    f"\n\n---\n\n"
+                    f"【轮回续缘】\n\n"
+                    f"汝已重返此界。前番试炼之因果已随风散去。\n\n"
+                    f"> 今日剩余机缘：**{opps}** 次\n\n"
+                    f"准备好了，便可开启下一场浮生之梦。"
+                )
+                new_display = [welcome, status_msg] if welcome else [status_msg]
+            else:
+                new_display = [welcome] if welcome else []
+
+            if len(display_hist) != len(new_display):
+                session["display_history"] = new_display
+                # 同时重置 internal_history，避免残留的错误重试指令
+                session["internal_history"] = [
+                    {"role": "system", "content": GAME_MASTER_SYSTEM_PROMPT}
+                ]
+                dirty = True
+                logger.info(
+                    f"Reconnect cleanup for {player_id}: cleared "
+                    f"{len(display_hist)} stale display entries, "
+                    f"opps={opps}"
+                )
+
+        if dirty:
             await state_manager.save_session(player_id, session)
 
         return session
@@ -257,38 +384,126 @@ async def _handle_roll_request(
     first_narrative: str,
     internal_history: list[dict],
 ) -> tuple[str, dict]:
-    roll_type, target, sides = (
-        roll_request.get("type", "判定"),
-        roll_request.get("target", 50),
-        roll_request.get("sides", 100),
+    roll_type = roll_request.get("type", "判定")
+    base_target = roll_request.get("target", 50)
+    sides = roll_request.get("sides", 100)
+
+    # 获取角色状态用于属性修正
+    current_life = session.get("current_life")
+
+    # 使用新骰子系统：基础成功率 + 属性 + 道具 + 状态
+    dice_result = dice_system.roll_dice(
+        base_target=base_target,
+        sides=sides,
+        roll_type=roll_type,
+        current_life=current_life,
     )
-    roll_result = random.randint(1, sides)
-    if roll_result <= (sides * 0.05):
-        outcome = "大成功"
-    elif roll_result <= target:
-        outcome = "成功"
-    elif roll_result >= (sides * 0.96):
-        outcome = "大失败"
-    else:
-        outcome = "失败"
-    result_text = f"【系统提示：针对 '{roll_type}' 的D{sides}判定已执行。目标值: {target}，投掷结果: {roll_result}，最终结果: {outcome}】"
+
+    # 应用继承系统的全局判定加成
+    legacy_bonus = session.get("legacy_roll_bonus", 0)
+    if legacy_bonus > 0:
+        # 加成后重新计算（在 dice_system 基础上额外加成）
+        adjusted_target = min(
+            int(sides * 0.95),  # 上限95%
+            dice_result["final_target"] + int(legacy_bonus / 100 * sides)
+        )
+        # 如果 legacy_bonus 改变了 target，重新判定 outcome
+        if adjusted_target != dice_result["final_target"]:
+            dice_result["final_target"] = adjusted_target
+            dice_result["breakdown"]["legacy_bonus"] = legacy_bonus
+            dice_result["breakdown"]["final_target"] = adjusted_target
+            # 重新判定
+            roll_result = dice_result["roll_result"]
+            critical_threshold = max(1, int(sides * 0.05))
+            if roll_result <= critical_threshold:
+                dice_result["outcome"] = "大成功"
+            elif roll_result <= adjusted_target:
+                dice_result["outcome"] = "成功"
+            else:
+                dice_result["outcome"] = "失败"
+
+    # --- 难度系统：应用难度修正 ---
+    difficulty_preset = _get_difficulty_preset(session)
+    if difficulty_preset.get("auto_success"):
+        # 气运之父：强制成功
+        dice_result["outcome"] = "大成功"
+        dice_result["breakdown"]["difficulty_bonus"] = "自动成功"
+    elif difficulty_preset.get("roll_modifier", 0) != 0:
+        diff_mod = difficulty_preset["roll_modifier"]
+        # diff_mod is in percentage points, apply to target
+        diff_target_delta = int(diff_mod / 100 * sides)
+        adjusted_target = max(1, min(
+            int(sides * 0.95),
+            dice_result["final_target"] + diff_target_delta
+        ))
+        if adjusted_target != dice_result["final_target"]:
+            dice_result["final_target"] = adjusted_target
+            dice_result["breakdown"]["difficulty_bonus"] = diff_mod
+            dice_result["breakdown"]["final_target"] = adjusted_target
+            # 重新判定 outcome
+            roll_result = dice_result["roll_result"]
+            critical_threshold = max(1, int(sides * 0.05))
+            if roll_result <= critical_threshold:
+                dice_result["outcome"] = "大成功"
+            elif roll_result <= adjusted_target:
+                dice_result["outcome"] = "成功"
+            else:
+                dice_result["outcome"] = "失败"
+
+    roll_result = dice_result["roll_result"]
+    final_target = dice_result["final_target"]
+    outcome = dice_result["outcome"]
+    breakdown = dice_result["breakdown"]
+
+    # 构建详细的结果文本
+    bonus_parts = []
+    if breakdown.get("attribute_bonus", 0) != 0:
+        attr_name = breakdown.get("attribute_name", "属性")
+        bonus_parts.append(f"{attr_name}{breakdown['attribute_bonus']:+d}%")
+    if breakdown.get("item_bonus", 0) != 0:
+        bonus_parts.append(f"道具{breakdown['item_bonus']:+d}%")
+    if breakdown.get("status_bonus", 0) != 0:
+        bonus_parts.append(f"状态{breakdown['status_bonus']:+d}%")
+    if breakdown.get("legacy_bonus", 0) != 0:
+        bonus_parts.append(f"功德{breakdown['legacy_bonus']:+d}%")
+    if breakdown.get("difficulty_bonus") is not None:
+        db = breakdown["difficulty_bonus"]
+        if isinstance(db, str):
+            bonus_parts.append(f"难度[{db}]")
+        elif db != 0:
+            bonus_parts.append(f"难度{db:+d}%")
+
+    bonus_text = f"（修正: {', '.join(bonus_parts)}）" if bonus_parts else ""
+    result_text = (
+        f"【系统提示：针对 '{roll_type}' 的D{sides}判定已执行。"
+        f"基础目标值: {base_target}，修正后目标值: {final_target}{bonus_text}，"
+        f"投掷结果: {roll_result}，最终结果: {outcome}】"
+    )
+
     roll_event = {
-        "id": f"{player_id}_{int(time.time() * 1000)}",  # 唯一标识
+        "id": f"{player_id}_{int(time.time() * 1000)}",
         "type": roll_type,
-        "target": target,
+        "target": final_target,
+        "original_target": base_target,
         "sides": sides,
         "result": roll_result,
         "outcome": outcome,
         "result_text": result_text,
+        "breakdown": breakdown,
     }
 
-    # 把骰子事件存到 session，通过 state patch 传递
+    # 把骰子事件存到 session
     session["roll_event"] = roll_event
     await state_manager.save_session(player_id, session)
 
+    # ── Send roll event IMMEDIATELY via dedicated WS message ──
+    # This bypasses the debounce in state sync, so the roll animation
+    # displays instantly on the frontend without needing a page refresh.
+    await websocket_manager.send_roll_event(player_id, roll_event)
+
     prompt_for_ai_part2 = f"{result_text}\n\n请严格基于此判定结果，继续叙事，并返回包含叙事和状态更新的最终JSON对象。这是当前的游戏状态JSON:\n{json.dumps(last_state, ensure_ascii=False)}"
-    history_for_part2 = internal_history  # History is now updated before this call
-    ai_response = await openai_client.get_ai_response(
+    history_for_part2 = internal_history
+    ai_response = await ai_service.get_ai_response(
         prompt=prompt_for_ai_part2, history=history_for_part2, user_id=player_id
     )
     return ai_response, roll_event
@@ -296,9 +511,9 @@ async def _handle_roll_request(
 
 def end_game_and_get_code(
     user_id: int, player_id: str, spirit_stones: int
-) -> tuple[dict, dict]:
+) -> tuple[dict, dict, int]:
     if spirit_stones <= 0:
-        return {"error": "未获得灵石，无法生成兑换码。"}, {}
+        return {"error": "未获得灵石，无法生成兑换码。"}, {}, 0
 
     converted_value = REWARD_SCALING_FACTOR * min(
         30, max(1, 3 * (spirit_stones ** (1 / 6)))
@@ -316,7 +531,7 @@ def end_game_and_get_code(
         return {
             "error": "数据库错误，无法生成兑换码。",
             "final_message": final_message,
-        }, {}
+        }, {}, spirit_stones
 
     logger.info(
         f"Generated and stored DB code {redemption_code} for {player_id} with value {converted_value:.2f}."
@@ -325,7 +540,7 @@ def end_game_and_get_code(
     return {"final_message": final_message, "redemption_code": redemption_code}, {
         "daily_success_achieved": True,
         "redemption_code": redemption_code,
-    }
+    }, spirit_stones
 
 
 def _extract_json_from_response(response_str: str) -> str | None:
@@ -334,17 +549,302 @@ def _extract_json_from_response(response_str: str) -> str | None:
         end_pos = response_str.find("```", start_pos)
         if end_pos != -1:
             return response_str[start_pos:end_pos].strip()
-    start_pos = response_str.find("{")
+
+    # Pre-fix unescaped quotes so brace counting isn't confused
+    fixed = _fix_unescaped_quotes_in_json(response_str)
+    start_pos = fixed.find("{")
     if start_pos != -1:
         brace_level = 0
-        for i in range(start_pos, len(response_str)):
-            if response_str[i] == "{":
+        in_string = False
+        escape_next = False
+        for i in range(start_pos, len(fixed)):
+            c = fixed[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if c == '\\' and in_string:
+                escape_next = True
+                continue
+            if c == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if c == "{":
                 brace_level += 1
-            elif response_str[i] == "}":
+            elif c == "}":
                 brace_level -= 1
                 if brace_level == 0:
-                    return response_str[start_pos : i + 1]
+                    return fixed[start_pos : i + 1]
     return None
+
+
+import re as _re
+
+
+def _fix_unescaped_quotes_in_json(raw: str) -> str:
+    """
+    修复 AI 返回 JSON 中字符串值内部的未转义双引号。
+
+    问题：AI 在 narrative 等字段中使用中文引号样式如
+        "天煞孤星"之命  或  "亦可登天。"
+    这些裸双引号会被 json.loads 当作字符串结束符，导致解析失败。
+
+    策略：逐字符扫描 JSON 文本，维护状态机区分"JSON 结构引号"和
+    "字符串内容中的裸引号"。如果在字符串内部遇到 `"` 且后续内容
+    不像 JSON 结构（即不是 : , } ] 或跟着新 key 模式），
+    就转义为 `\"`。
+    """
+    if not raw or '"' not in raw:
+        return raw
+
+    result = []
+    i = 0
+    length = len(raw)
+
+    OUTSIDE = 0
+    IN_KEY = 1
+    IN_VALUE = 2
+    state = OUTSIDE
+    expect_key = True  # After '{' we expect a key
+    # Bracket stack to track object vs array context for comma handling
+    bracket_stack = []  # '{' or '['
+
+    while i < length:
+        c = raw[i]
+
+        if state == OUTSIDE:
+            result.append(c)
+            if c == '"':
+                if expect_key:
+                    state = IN_KEY
+                else:
+                    state = IN_VALUE
+            elif c == '{':
+                bracket_stack.append('{')
+                expect_key = True
+            elif c == '[':
+                bracket_stack.append('[')
+                expect_key = False  # array elements are values
+            elif c == '}':
+                if bracket_stack and bracket_stack[-1] == '{':
+                    bracket_stack.pop()
+                # After closing }, context depends on parent
+                if bracket_stack:
+                    expect_key = bracket_stack[-1] == '{'
+                else:
+                    expect_key = True
+            elif c == ']':
+                if bracket_stack and bracket_stack[-1] == '[':
+                    bracket_stack.pop()
+                if bracket_stack:
+                    expect_key = bracket_stack[-1] == '{'
+                else:
+                    expect_key = True
+            elif c == ':':
+                expect_key = False
+            elif c == ',':
+                # After comma: in object → expect key; in array → expect value
+                if bracket_stack and bracket_stack[-1] == '[':
+                    expect_key = False
+                else:
+                    expect_key = True
+            i += 1
+            continue
+
+        if state == IN_KEY:
+            if c == '\\' and i + 1 < length:
+                result.append(c)
+                result.append(raw[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                result.append(c)
+                state = OUTSIDE
+                expect_key = False  # After key comes :
+                i += 1
+                continue
+            result.append(c)
+            i += 1
+            continue
+
+        if state == IN_VALUE:
+            if c == '\\' and i + 1 < length:
+                result.append(c)
+                result.append(raw[i + 1])
+                i += 2
+                continue
+
+            if c == '"':
+                # Is this the REAL end of the JSON string value,
+                # or an unescaped literary quote inside the text?
+                j = i + 1
+                while j < length and raw[j] in ' \t\r\n':
+                    j += 1
+
+                if j >= length:
+                    # End of text — closing quote
+                    result.append(c)
+                    state = OUTSIDE
+                    expect_key = True
+                    i += 1
+                    continue
+
+                next_meaningful = raw[j]
+
+                if next_meaningful in (',', ':', '}', ']'):
+                    # Looks like a real JSON structural boundary
+                    result.append(c)
+                    state = OUTSIDE
+                    if next_meaningful == ':':
+                        expect_key = False
+                    elif next_meaningful in (',', '}'):
+                        expect_key = True
+                    elif next_meaningful == ']':
+                        expect_key = False
+                    i += 1
+                    continue
+
+                if next_meaningful == '"':
+                    # Peek: does this look like "someKey": pattern?
+                    k = j + 1
+                    while k < length and raw[k] != '"':
+                        if raw[k] == '\\':
+                            k += 1
+                        k += 1
+                    k += 1  # skip closing quote
+                    while k < length and raw[k] in ' \t\r\n':
+                        k += 1
+                    if k < length and raw[k] == ':':
+                        # "key": pattern → real end of value
+                        result.append(c)
+                        state = OUTSIDE
+                        expect_key = True
+                        i += 1
+                        continue
+                    if k < length and raw[k] in (',', '}', ']'):
+                        result.append(c)
+                        state = OUTSIDE
+                        expect_key = True
+                        i += 1
+                        continue
+
+                # Internal unescaped quote → escape it
+                result.append('\\"')
+                i += 1
+                continue
+
+            result.append(c)
+            i += 1
+            continue
+
+        i += 1
+
+    return ''.join(result)
+
+
+def _robust_json_loads(json_str: str) -> dict:
+    """
+    尝试多种策略解析 AI 返回的可能不合法的 JSON 字符串。
+    处理常见问题：单引号、尾逗号、注释、markdown 残留等。
+    """
+    # 第一次尝试：直接解析（快速路径）
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        pass
+
+    original = json_str
+
+    # ★ 策略0：修复字符串值内部的未转义双引号（AI 常见问题）
+    fixed_quotes = _fix_unescaped_quotes_in_json(json_str)
+    if fixed_quotes != json_str:
+        try:
+            return json.loads(fixed_quotes)
+        except json.JSONDecodeError:
+            pass
+        # 用修复后的版本继续后续策略
+        json_str = fixed_quotes
+
+    # 策略1：去除可能的 markdown 残留
+    json_str = json_str.strip()
+    if json_str.startswith("```"):
+        json_str = _re.sub(r'^```\w*\n?', '', json_str)
+        json_str = _re.sub(r'\n?```$', '', json_str).strip()
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        pass
+
+    # 策略2：去掉行尾注释 // ...
+    cleaned = _re.sub(r'//[^\n]*', '', json_str)
+    # 去掉块注释 /* ... */
+    cleaned = _re.sub(r'/\*.*?\*/', '', cleaned, flags=_re.DOTALL)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # 策略3：修复尾逗号 (,} 或 ,])
+    cleaned = _re.sub(r',\s*([}\]])', r'\1', cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # 策略4：单引号替换为双引号（注意不破坏内部文本）
+    # 仅在非双引号包裹区域进行替换
+    def _replace_single_quotes(s: str) -> str:
+        result = []
+        in_double = False
+        in_single = False
+        i = 0
+        while i < len(s):
+            c = s[i]
+            if c == '\\' and i + 1 < len(s):
+                result.append(c + s[i + 1])
+                i += 2
+                continue
+            if c == '"' and not in_single:
+                in_double = not in_double
+                result.append(c)
+            elif c == "'" and not in_double:
+                if in_single:
+                    result.append('"')
+                    in_single = False
+                else:
+                    result.append('"')
+                    in_single = True
+            else:
+                result.append(c)
+            i += 1
+        return ''.join(result)
+
+    cleaned2 = _replace_single_quotes(cleaned)
+    try:
+        return json.loads(cleaned2)
+    except json.JSONDecodeError:
+        pass
+
+    # 策略5：用正则提取看起来像 JSON 对象的部分重新尝试
+    match = _re.search(r'\{[\s\S]*\}', original)
+    if match:
+        extracted = match.group(0)
+        # 再走一遍清理流程
+        extracted = _re.sub(r'//[^\n]*', '', extracted)
+        extracted = _re.sub(r'/\*.*?\*/', '', extracted, flags=_re.DOTALL)
+        extracted = _re.sub(r',\s*([}\]])', r'\1', extracted)
+        try:
+            return json.loads(extracted)
+        except json.JSONDecodeError:
+            try:
+                return json.loads(_replace_single_quotes(extracted))
+            except json.JSONDecodeError:
+                pass
+
+    # 所有策略失败，抛出原始错误
+    logger.error(f"_robust_json_loads: All parsing strategies failed. Raw input (first 500 chars): {original[:500]}")
+    return json.loads(original)  # 让它抛出原始错误
 
 
 def _effective_unchecked_rounds_for_cheat_check(raw_value: object) -> int:
@@ -364,17 +864,27 @@ def _effective_unchecked_rounds_for_cheat_check(raw_value: object) -> int:
 
 
 def _apply_state_update(state: dict, update: dict) -> dict:
+    # --- 社交系统：拦截并处理人物关系更新 ---
+    social_updates = {}
+    regular_updates = {}
     for key, value in update.items():
+        if key.startswith("current_life.人物关系.") and isinstance(value, dict):
+            # 提取 NPC 名字: "current_life.人物关系.云霄真人" → "云霄真人"
+            npc_name = key.split(".", 2)[2] if key.count(".") >= 2 else key
+            social_updates[npc_name] = value
+        else:
+            regular_updates[key] = value
+
+    # 先应用常规更新
+    for key, value in regular_updates.items():
         if key == "unchecked_rounds_count":
             continue
         if key == "internal_history" or key.startswith("internal_history."):
             continue
-        # if key in ["daily_success_achieved"]: continue  # Prevent overwriting daily success flag
 
         keys = key.split(".")
         temp_state = state
         for part in keys[:-1]:
-            # 确保中间路径存在且不为 None
             if part not in temp_state or temp_state[part] is None:
                 temp_state[part] = {}
             temp_state = temp_state[part]
@@ -388,7 +898,533 @@ def _apply_state_update(state: dict, update: dict) -> dict:
                 temp_state[list_key].append(value)
         else:
             temp_state[keys[-1]] = value
+
+    # 再通过 social_system 处理人物关系更新
+    if social_updates and state.get("current_life"):
+        try:
+            social_messages = social_system.process_social_state_update(
+                state["current_life"], social_updates
+            )
+            # 把社交系统产生的消息存到 state 中供后续展示
+            if social_messages:
+                if "_social_messages" not in state:
+                    state["_social_messages"] = []
+                state["_social_messages"].extend(social_messages)
+        except Exception as e:
+            logger.error(f"社交系统处理失败: {e}", exc_info=True)
+
     return state
+
+
+async def _stream_narrative_to_player(player_id: str, narrative: str, stream_id: str):
+    """
+    将 narrative 文本以流式方式发送给前端，模拟逐字输出效果。
+    每次发送一小段文本，通过短暂延迟制造打字机效果。
+    """
+    if not narrative:
+        return
+    
+    # 按字符分组发送，每组2-4个字符
+    chunk_size = 3
+    for i in range(0, len(narrative), chunk_size):
+        chunk = narrative[i:i + chunk_size]
+        await websocket_manager.send_stream_chunk(player_id, chunk, stream_id)
+        await asyncio.sleep(0.03)  # 30ms 间隔，约每秒100字
+    
+    await websocket_manager.send_stream_end(player_id, stream_id)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Truncation detection, continuation, and JSON repair
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _is_json_truncated(text: str) -> bool:
+    """
+    Detect if a response looks like truncated JSON.
+    Heuristics:
+    - Contains '{' but braces don't balance
+    - Ends mid-string (no closing quote) or mid-value
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    # Remove markdown fencing if present
+    if stripped.startswith("```"):
+        stripped = _re.sub(r'^```\w*\n?', '', stripped)
+        stripped = _re.sub(r'\n?```$', '', stripped).strip()
+
+    # Pre-fix unescaped quotes so they don't confuse brace/string tracking
+    stripped = _fix_unescaped_quotes_in_json(stripped)
+
+    brace_depth = 0
+    in_string = False
+    escape_next = False
+    for c in stripped:
+        if escape_next:
+            escape_next = False
+            continue
+        if c == '\\' and in_string:
+            escape_next = True
+            continue
+        if c == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == '{':
+            brace_depth += 1
+        elif c == '}':
+            brace_depth -= 1
+
+    # If we're still inside a string or braces aren't balanced => truncated
+    return in_string or brace_depth > 0
+
+
+def _repair_truncated_json(text: str) -> str | None:
+    """
+    Attempt to repair a truncated JSON by closing open strings, arrays, and objects.
+    Returns the repaired JSON string, or None if repair isn't feasible.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    # Remove markdown fencing
+    if stripped.startswith("```"):
+        stripped = _re.sub(r'^```\w*\n?', '', stripped)
+        stripped = _re.sub(r'\n?```$', '', stripped).strip()
+
+    # Pre-fix unescaped quotes before structural analysis
+    stripped = _fix_unescaped_quotes_in_json(stripped)
+
+    # Find the first '{'
+    first_brace = stripped.find('{')
+    if first_brace == -1:
+        return None
+    json_part = stripped[first_brace:]
+
+    # Walk through and track state
+    stack = []  # stack of '{' or '['
+    in_string = False
+    escape_next = False
+    last_key = False  # True if we just saw a key and colon
+    i = 0
+    while i < len(json_part):
+        c = json_part[i]
+        if escape_next:
+            escape_next = False
+            i += 1
+            continue
+        if c == '\\' and in_string:
+            escape_next = True
+            i += 1
+            continue
+        if c == '"':
+            in_string = not in_string
+            i += 1
+            continue
+        if in_string:
+            i += 1
+            continue
+        # Outside string
+        if c == '{':
+            stack.append('}')
+        elif c == '[':
+            stack.append(']')
+        elif c == '}' or c == ']':
+            if stack:
+                stack.pop()
+        i += 1
+
+    if not stack and not in_string:
+        # Already balanced (maybe just had trailing garbage)
+        return json_part
+
+    # Build the repair suffix
+    repair = ""
+    if in_string:
+        # Close the open string — truncate cleanly
+        # Remove any trailing incomplete escape sequence
+        if json_part.endswith('\\'):
+            json_part = json_part[:-1]
+        repair += '...(内容过长已截断)"'
+
+    # Check if the JSON ends after a colon (key with no value), a comma,
+    # or other incomplete construct — we need a placeholder value
+    tail = (json_part + repair).rstrip()
+    if tail.endswith(':'):
+        repair += ' null'
+    elif tail.endswith(','):
+        # Remove trailing comma before closing
+        json_part = json_part.rstrip()
+        if json_part.endswith(','):
+            json_part = json_part[:-1]
+        elif repair.rstrip().endswith(','):
+            repair = repair.rstrip()[:-1]
+
+    # Close any open brackets/braces in reverse order
+    for closer in reversed(stack):
+        repair += closer
+
+    repaired = json_part + repair
+    logger.info(f"JSON repair: added {len(repair)} chars suffix to close {len(stack)} brackets, in_string={in_string}")
+    return repaired
+
+
+_CONTINUATION_PROMPT = (
+    "你的上一次回答被截断了，输出不完整。请从截断处继续输出，"
+    "直接接续上文（不要重复已有内容），确保JSON格式完整闭合。"
+    "只输出剩余部分，不要任何解释。"
+)
+
+
+async def _parse_with_continuation(
+    raw_response: str,
+    player_id: str,
+    history: list[dict],
+    max_continuations: int = 2,
+) -> dict:
+    """
+    Parse AI response JSON, with automatic truncation detection,
+    continuation requests, and repair as fallback.
+
+    Flow:
+    1. Try parse directly
+    2. If truncated -> ask AI to continue (up to max_continuations times)
+    3. If still truncated -> attempt structural JSON repair
+    4. If all fails -> raise
+    """
+    combined = raw_response
+
+    # ★ Pre-fix: escape unescaped literary quotes in the raw response
+    combined = _fix_unescaped_quotes_in_json(combined)
+
+    # ── Step 1: direct parse ──
+    json_str = _extract_json_from_response(combined)
+    if json_str:
+        try:
+            return _robust_json_loads(json_str)
+        except (json.JSONDecodeError, Exception):
+            pass  # Fall through to truncation check
+
+    # ── Step 2: truncation detection + continuation ──
+    if _is_json_truncated(combined):
+        logger.warning(
+            f"Truncated JSON detected ({len(combined)} chars). "
+            f"Attempting continuation (max {max_continuations} attempts)..."
+        )
+
+        for attempt in range(max_continuations):
+            logger.info(f"Continuation attempt {attempt + 1}/{max_continuations}")
+
+            # Build a temporary history with the partial response as assistant
+            # and a continuation request as user
+            cont_history = history.copy()
+            cont_history.append({"role": "assistant", "content": combined})
+            cont_history.append({"role": "user", "content": _CONTINUATION_PROMPT})
+
+            # Get continuation (non-streaming for reliability)
+            continuation = await ai_service.get_ai_response(
+                prompt=_CONTINUATION_PROMPT,
+                history=cont_history,
+                force_json=False,
+                user_id=player_id,
+            )
+
+            if continuation and not continuation.startswith("错误："):
+                logger.info(
+                    f"Continuation received: {len(continuation)} chars, "
+                    f"first 200: {continuation[:200]}"
+                )
+                # Stitch: the continuation should directly follow the truncated text
+                # Remove any repeated prefix (AI sometimes echoes a bit)
+                continuation_clean = continuation.strip()
+                # Remove markdown fencing from continuation
+                if continuation_clean.startswith("```"):
+                    continuation_clean = _re.sub(r'^```\w*\n?', '', continuation_clean)
+                    continuation_clean = _re.sub(r'\n?```$', '', continuation_clean).strip()
+
+                combined = combined.rstrip() + continuation_clean
+
+                # Try parse again
+                json_str = _extract_json_from_response(combined)
+                if json_str:
+                    try:
+                        result = _robust_json_loads(json_str)
+                        logger.info(
+                            f"Continuation success on attempt {attempt + 1}! "
+                            f"Total length: {len(combined)} chars"
+                        )
+                        return result
+                    except (json.JSONDecodeError, Exception) as e:
+                        logger.warning(f"Parse still failed after continuation {attempt + 1}: {e}")
+
+                # Check if still truncated
+                if not _is_json_truncated(combined):
+                    # Not truncated anymore but still can't parse — try repair
+                    break
+            else:
+                logger.warning(f"Continuation attempt {attempt + 1} returned error: {continuation[:200] if continuation else 'empty'}")
+
+    # ── Step 3: structural repair ──
+    logger.info(f"Attempting JSON structural repair on {len(combined)} chars...")
+    repaired = _repair_truncated_json(combined)
+    if repaired:
+        try:
+            result = _robust_json_loads(repaired)
+            logger.info(f"JSON repair successful! Parsed repaired response.")
+            return result
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"JSON repair failed to parse: {e}")
+
+    # ── Step 4: all strategies exhausted ──
+    logger.error(
+        f"All parse strategies failed ({len(combined)} chars). "
+        f"First 500: {combined[:500]}"
+    )
+    # Last resort: extract whatever we can and build a minimal valid response
+    # to avoid crashing the game loop
+    narrative_text = _extract_narrative_from_broken_json(combined)
+    if narrative_text and len(narrative_text) > 20:
+        logger.info(f"Salvaged {len(narrative_text)} chars of narrative from broken JSON")
+        return {
+            "narrative": narrative_text,
+            "state_update": {}
+        }
+
+    raise json.JSONDecodeError(
+        "All parsing strategies failed (direct, continuation, repair, salvage)",
+        combined[:200], 0
+    )
+
+
+def _extract_narrative_from_broken_json(text: str) -> str | None:
+    """
+    Last-resort extraction: pull the narrative value from broken JSON
+    by finding the "narrative" key and reading the string value.
+    """
+    for marker in ['"narrative":"', '"narrative": "', '"narrative" : "']:
+        idx = text.find(marker)
+        if idx != -1:
+            start = idx + len(marker)
+            decoded = _decode_json_string_value(text[start:])
+            if decoded and len(decoded) > 10:
+                return decoded
+    return None
+
+
+async def _get_ai_response_streaming(
+    player_id: str,
+    prompt: str,
+    history: list[dict],
+) -> str:
+    """
+    使用流式 API 获取 AI 响应，同时将 narrative 部分实时推送给前端。
+
+    策略:
+    1. 流式收集完整 JSON 响应
+    2. 在收集过程中，尝试提取并实时推送 narrative 字段的内容
+    3. 如果 Echo 返回 __ECHO_FULL_REPLACE__ 哨兵，用完整内容替换部分收集
+    4. 返回完整的 JSON 字符串供后续处理
+    """
+    REPLACE_SENTINEL = ai_service.ECHO_FULL_REPLACE_SENTINEL
+
+    stream_id = f"{player_id}_{int(time.time() * 1000)}"
+    full_response = ""
+    narrative_started = False
+    narrative_buffer = ""
+    sent_length = 0
+    in_narrative_value = False
+
+    async for chunk in ai_service.get_ai_response_stream(
+        prompt=prompt, history=history, user_id=player_id
+    ):
+        if chunk is None:
+            break
+
+        # --- Echo full-replace sentinel ---
+        # When the streaming chunks were incomplete, the Echo backend sends
+        # __ECHO_FULL_REPLACE__<complete JSON> so we can discard partial data.
+        if isinstance(chunk, str) and chunk.startswith(REPLACE_SENTINEL):
+            replacement = chunk[len(REPLACE_SENTINEL):]
+            logger.info(
+                f"Stream replace: discarding {len(full_response)} partial chars, "
+                f"using {len(replacement)} char complete response"
+            )
+            full_response = replacement
+            # Push the full narrative from the replacement to the frontend
+            narrative_started = False
+            in_narrative_value = False
+            sent_length = 0
+            # Re-extract narrative from the complete response for streaming to frontend
+            for marker in ['"narrative":"', '"narrative": "', '"narrative" : "']:
+                idx = replacement.find(marker)
+                if idx != -1:
+                    start = idx + len(marker)
+                    decoded = _decode_json_string_value(replacement[start:])
+                    if decoded and len(decoded) > 0:
+                        narrative_started = True
+                        # Send the whole narrative at once (with small delays for effect)
+                        chunk_size = 8
+                        for ci in range(0, len(decoded), chunk_size):
+                            text_chunk = decoded[ci:ci + chunk_size]
+                            await websocket_manager.send_stream_chunk(player_id, text_chunk, stream_id)
+                            await asyncio.sleep(0.01)
+                        sent_length = len(decoded)
+                    break
+            continue
+
+        full_response += chunk
+
+        # --- Real-time narrative extraction and push ---
+        if not narrative_started:
+            for marker in ['"narrative":"', '"narrative": "', '"narrative" : "']:
+                idx = full_response.find(marker)
+                if idx != -1:
+                    narrative_started = True
+                    in_narrative_value = True
+                    break
+
+        if in_narrative_value:
+            # Re-extract decoded narrative from the full response so far
+            narrative_buffer = ""
+            for marker in ['"narrative":"', '"narrative": "', '"narrative" : "']:
+                idx = full_response.find(marker)
+                if idx != -1:
+                    start = idx + len(marker)
+                    narrative_buffer = _decode_json_string_value(full_response[start:])
+                    break
+
+            # Send unsent portion
+            if len(narrative_buffer) > sent_length:
+                new_content = narrative_buffer[sent_length:]
+                chunk_size = 3
+                for ci in range(0, len(new_content), chunk_size):
+                    text_chunk = new_content[ci:ci + chunk_size]
+                    await websocket_manager.send_stream_chunk(player_id, text_chunk, stream_id)
+                    await asyncio.sleep(0.02)
+                sent_length = len(narrative_buffer)
+
+    # Stream finished — send end signal
+    if narrative_started:
+        await websocket_manager.send_stream_end(player_id, stream_id)
+
+    # Log collected response length for debugging
+    logger.info(f"Stream collection done for {player_id}: {len(full_response)} chars")
+    if len(full_response) < 50:
+        logger.warning(f"Stream response suspiciously short: {full_response!r}")
+
+    # Fallback to non-streaming if stream produced nothing useful
+    if not full_response or full_response.startswith("错误："):
+        logger.warning(f"Stream failed or empty, falling back to non-stream API")
+        full_response = await ai_service.get_ai_response(
+            prompt=prompt, history=history, user_id=player_id
+        )
+
+    return full_response
+
+
+def _decode_json_string_value(buf: str) -> str:
+    """
+    Decode a JSON string value starting right after the opening quote.
+    Handles \\", \\n, \\\\, \\t, \\/ escapes.
+    Uses heuristics to skip unescaped literary quotes like "天煞孤星"
+    that appear inside Chinese narrative text.
+    Stops at the REAL closing quote (or end of buffer for partial streams).
+    """
+    decoded = ""
+    i = 0
+    buf_len = len(buf)
+    while i < buf_len:
+        c = buf[i]
+        if c == '\\' and i + 1 < buf_len:
+            next_c = buf[i + 1]
+            if next_c == '"':
+                decoded += '"'
+            elif next_c == 'n':
+                decoded += '\n'
+            elif next_c == '\\':
+                decoded += '\\'
+            elif next_c == 't':
+                decoded += '\t'
+            elif next_c == '/':
+                decoded += '/'
+            elif next_c == 'r':
+                decoded += '\r'
+            elif next_c == 'u':
+                # Unicode escape \uXXXX
+                if i + 5 < buf_len:
+                    hex_str = buf[i + 2:i + 6]
+                    try:
+                        decoded += chr(int(hex_str, 16))
+                        i += 6
+                        continue
+                    except ValueError:
+                        decoded += '\\u'
+                        i += 2
+                        continue
+                else:
+                    break  # Incomplete unicode escape, wait for more data
+            else:
+                decoded += '\\' + next_c
+            i += 2
+        elif c == '"':
+            # Is this the REAL end of string, or an unescaped literary quote?
+            # Look ahead past whitespace for JSON structural chars
+            j = i + 1
+            while j < buf_len and buf[j] in ' \t\r\n':
+                j += 1
+            if j >= buf_len:
+                # End of buffer — treat as real end (or partial stream)
+                break
+            next_meaningful = buf[j]
+            if next_meaningful in (',', ':', '}', ']'):
+                # Structural char → real end of string
+                break
+            if next_meaningful == '"':
+                # Could be the start of the next key.
+                # Peek: "someKey" : → real boundary
+                k = j + 1
+                while k < buf_len and buf[k] != '"':
+                    if buf[k] == '\\':
+                        k += 1
+                    k += 1
+                k += 1  # skip closing quote
+                while k < buf_len and buf[k] in ' \t\r\n':
+                    k += 1
+                if k < buf_len and buf[k] in (':', ',', '}', ']'):
+                    break  # Real boundary
+            # Otherwise, it's a literary quote inside the text — include it
+            decoded += '"'
+            i += 1
+        else:
+            decoded += c
+            i += 1
+    return decoded
+
+
+def _build_action_prompt(session_copy: dict, action: str) -> str:
+    """
+    构建包含社交上下文的 AI prompt。
+    """
+    base = f'这是当前的游戏状态JSON:\n{json.dumps(session_copy, ensure_ascii=False)}'
+
+    # 注入社交关系摘要 (让 AI 知道当前 NPC 好感度状态)
+    current_life = session_copy.get("current_life")
+    social_ctx = ""
+    if current_life:
+        social_ctx = social_system.inject_social_context_for_ai(current_life)
+        if social_ctx:
+            social_ctx = f"\n\n{social_ctx}\n（请根据NPC好感度和性格来决定NPC的态度和行为。好感度到达瓶颈时应创造突破机会。负面好感度的NPC可能主动发起挑衅/陷害事件。）"
+
+    prompt = (
+        f'{base}{social_ctx}\n\n'
+        f'玩家的行动是: "{action}"\n\n'
+        f'请根据状态和行动，生成包含`narrative`和(`state_update`或`roll_request`)的JSON作为回应。'
+        f'如果角色死亡，请在叙述中说明，并在`state_update`中同时将`is_in_trial`设为`false`，`current_life`设为`null`。'
+        f'如果有NPC互动，请在state_update中更新人物关系（格式: "current_life.人物关系.NPC名":{{...}}）。'
+    )
+    return prompt
 
 
 async def _process_player_action_async(user_info: dict, action: str):
@@ -399,29 +1435,78 @@ async def _process_player_action_async(user_info: dict, action: str):
         logger.error(f"Async task: Could not find session for {player_id}.")
         return
 
+    # Restore backend session state from persistent storage on every action
+    # (survives server restarts / hot-reloads)
     try:
-        is_starting_trial = action in [
+        ai_service.restore_backend_session(player_id, session)
+    except Exception:
+        pass
+
+    try:
+        # Extract base action (strip companion mode suffix like ":独行"/":同行")
+        action_base = action.split(":")[0].strip() if ":" in action else action
+        is_starting_trial = action_base in [
             "开始试炼",
             "开启下一次试炼",
+            "开始第一次试炼",
         ] and not session.get("is_in_trial")
         is_first_ever_trial_of_day = (
             is_starting_trial
             and session.get("opportunities_remaining") == INITIAL_OPPORTUNITIES
         )
+
+        # Reset backend session when starting a new trial
+        if is_starting_trial:
+            try:
+                ai_service.reset_backend_session(player_id, session)
+            except Exception:
+                pass
+
+            # ── Clean slate: reset internal_history to only system prompt ──
+            # Previous trial's conversation (or error retries) must not bleed
+            # into the new trial.
+            session["internal_history"] = [
+                {"role": "system", "content": GAME_MASTER_SYSTEM_PROMPT}
+            ]
+            # Keep only the welcome banner (first element) in display_history;
+            # drop everything else (stale trial narratives, error messages, etc.)
+            welcome = session.get("display_history", [""])[0] if session.get("display_history") else ""
+            session["display_history"] = [welcome] if welcome else []
+            logger.info(f"Trial start: cleared histories for {player_id}")
+
+        # ── Extract companion mode and difficulty from action ──
+        # Frontend sends "开始试炼:独行:凡人修仙" or "开始试炼:同行:气运之子" etc.
+        companion_mode = "同行（生成初始伙伴）"  # default
+        difficulty_name = DEFAULT_DIFFICULTY
+        if is_starting_trial and ":" in action:
+            parts = action.split(":")
+            if len(parts) >= 2:
+                mode_part = parts[1].strip()
+                if "独" in mode_part:
+                    companion_mode = "独行（无同行伙伴）"
+            if len(parts) >= 3:
+                diff_part = parts[2].strip()
+                if diff_part in DIFFICULTY_PRESETS:
+                    difficulty_name = diff_part
+            # Store difficulty in session for roll/endgame use
+            session["difficulty"] = difficulty_name
+            logger.info(f"Trial start for {player_id}: companion={companion_mode}, difficulty={difficulty_name}")
+
         session_copy = deepcopy(session)
         session_copy.pop("internal_history", 0)
         session_copy["display_history"] = (
             "\n".join(session_copy.get("display_history", []))
         )[-300:]
         prompt_for_ai = (
-            START_GAME_PROMPT
+            START_GAME_PROMPT.format(companion_mode=companion_mode)
             if is_first_ever_trial_of_day
             else START_TRIAL_PROMPT.format(
                 opportunities_remaining=session["opportunities_remaining"],
                 opportunities_remaining_minus_1=session["opportunities_remaining"] - 1,
+                companion_mode=companion_mode,
             )
             if is_starting_trial
-            else f'这是当前的游戏状态JSON:\n{json.dumps(session_copy, ensure_ascii=False)}\n\n玩家的行动是: "{action}"\n\n请根据状态和行动，生成包含`narrative`和(`state_update`或`roll_request`)的JSON作为回应。如果角色死亡，请在叙述中说明，并在`state_update`中同时将`is_in_trial`设为`false`，`current_life`设为`null`。'
+            else _build_action_prompt(session_copy, action)
         )
 
         # Update histories with user action first
@@ -429,17 +1514,33 @@ async def _process_player_action_async(user_info: dict, action: str):
         session["display_history"].append(f"> {action}")
 
         await state_manager.save_session(player_id, session)
-        # Get AI response
-        ai_json_response_str = await openai_client.get_ai_response(
-            prompt=prompt_for_ai, history=session["internal_history"], user_id=player_id
+        
+        # --- 使用流式获取 AI 响应（含截断续写机制）---
+        ai_json_response_str = await _get_ai_response_streaming(
+            player_id, prompt_for_ai, session["internal_history"]
         )
 
         if ai_json_response_str.startswith("错误："):
             raise Exception(f"OpenAI Client Error: {ai_json_response_str}")
-        json_str = _extract_json_from_response(ai_json_response_str)
-        if not json_str:
-            raise json.JSONDecodeError("No JSON found", ai_json_response_str, 0)
-        ai_response_data = json.loads(json_str)
+
+        # Persist backend session state immediately after first AI call
+        # (don't wait for finally — if subsequent processing fails, we'd lose the id)
+        try:
+            ai_service.persist_backend_session(player_id, session)
+        except Exception:
+            pass
+
+        logger.info(
+            f"Full response ({len(ai_json_response_str)} chars, first 500): "
+            f"{ai_json_response_str[:500]}"
+        )
+
+        # ── Try parse; if truncated, attempt continuation or repair ──
+        ai_response_data = await _parse_with_continuation(
+            ai_json_response_str,
+            player_id,
+            session["internal_history"],
+        )
 
         # Handle Roll vs No-Roll Path
         if "roll_request" in ai_response_data and ai_response_data["roll_request"]:
@@ -473,7 +1574,7 @@ async def _process_player_action_async(user_info: dict, action: str):
                 raise json.JSONDecodeError(
                     "No JSON in second-stage", final_ai_json_str, 0
                 )
-            final_response_data = json.loads(final_json_str)
+            final_response_data = _robust_json_loads(final_json_str)
 
             # 4. Process final response
             narrative = final_response_data.get("narrative", "AI响应格式错误，请重试")
@@ -486,6 +1587,9 @@ async def _process_player_action_async(user_info: dict, action: str):
                     {"role": "assistant", "content": final_ai_json_str},
                 ]
             )
+            # ── 不再单独流式推送 roll 后的 narrative ──
+            # narrative 已通过 display_history 添加，save_session 会触发
+            # full_state → render() 自动渲染。额外的流式推送会导致重复显示。
             if narrative == "AI响应格式错误，请重试":
                 session["internal_history"].append(
                     {
@@ -510,6 +1614,40 @@ async def _process_player_action_async(user_info: dict, action: str):
                     },
                 )
 
+        # --- 社交系统：展示好感度变动消息 ---
+        social_messages = session.pop("_social_messages", [])
+        if social_messages:
+            social_text = "\n\n".join(f"⚔ {msg}" for msg in social_messages)
+            session["display_history"].append(
+                f"\n\n【人缘变动】\n\n{social_text}"
+            )
+
+        # --- 难度系统：开局时根据难度钳制属性 ---
+        if is_starting_trial and session.get("current_life"):
+            preset = _get_difficulty_preset(session)
+            _clamp_attributes(session["current_life"], preset)
+            if preset["label"] != DEFAULT_DIFFICULTY:
+                logger.info(
+                    f"Difficulty '{preset['label']}' applied for {player_id}: "
+                    f"attr_min={preset.get('attr_min')}, attr_max={preset.get('attr_max')}"
+                )
+
+        # --- 继承系统：试炼开始时应用先天奖励 ---
+        if is_starting_trial and session.get("current_life"):
+            try:
+                session = await legacy_system.apply_blessings_to_session(player_id, session)
+                applied = session.pop("applied_blessings_desc", None)
+                if applied:
+                    blessing_text = (
+                        "\n\n【前世遗泽 · 先天觉醒】\n\n"
+                        "轮回之力涌动，前世之因果在此刻显化：\n\n"
+                        + "\n".join(f"> ✦ {desc}" for desc in applied)
+                        + "\n\n前世功德，今生得报。善加利用此等先天之利。"
+                    )
+                    session["display_history"].append(blessing_text)
+            except Exception as e:
+                logger.error(f"应用先天奖励失败 {player_id}: {e}")
+
         await state_manager.save_session(player_id, session)
         # --- Common final logic for both paths ---
         trigger = state_update.get("trigger_program")
@@ -530,13 +1668,51 @@ async def _process_player_action_async(user_info: dict, action: str):
                 if updated_session:
                     session = updated_session
                 spirit_stones = trigger.get("spirit_stones", 0)
-                end_game_data, end_day_update = end_game_and_get_code(
+                end_game_data, end_day_update, earned_stones = end_game_and_get_code(
                     user_id, player_id, spirit_stones
                 )
                 session = _apply_state_update(session, end_day_update)
                 session["display_history"].append(
                     end_game_data.get("final_message", "")
                 )
+
+                # --- 继承系统：综合评估功德点 ---
+                if earned_stones > 0:
+                    try:
+                        difficulty_preset = _get_difficulty_preset(session)
+                        legacy_result = await legacy_system.add_legacy_points(
+                            player_id,
+                            earned_stones,
+                            session=session,
+                            difficulty_multiplier=difficulty_preset["legacy_multiplier"],
+                        )
+                        pts = legacy_result["points_earned"]
+                        total = legacy_result["total_points"]
+                        lb = legacy_result.get("breakdown", {})
+                        diff_name = session.get("difficulty", DEFAULT_DIFFICULTY)
+                        diff_label = f"（难度: {diff_name}，系数×{difficulty_preset['legacy_multiplier']}）" if diff_name != DEFAULT_DIFFICULTY else ""
+                        detail_parts = []
+                        if lb.get("realm", 0) > 0:
+                            detail_parts.append(f"境界 {lb['realm']}")
+                        if lb.get("spirit_stones", 0) > 0:
+                            detail_parts.append(f"灵石 {lb['spirit_stones']}")
+                        if lb.get("items", 0) > 0:
+                            detail_parts.append(f"道具 {lb['items']}")
+                        if lb.get("attributes", 0) > 0:
+                            detail_parts.append(f"属性 {lb['attributes']}")
+                        detail_text = f"评分明细: {' + '.join(detail_parts)} = {lb.get('total_score', pts)}" if detail_parts else ""
+                        session["display_history"].append(
+                            f"\n\n【轮回铭刻 · 功德累积】\n\n"
+                            f"此番试炼之因果已铭刻于轮回长河。\n\n"
+                            f"> 综合评分: **{lb.get('total_score', pts)}** {diff_label}\n"
+                            f"> {detail_text}\n"
+                            f"> 获得功德点: **{pts}**\n"
+                            f"> 累计功德点: **{total}**\n\n"
+                            f"功德点可在下一次试炼前，于【先天奖励】中兑换前世遗泽，"
+                            f"为新生之身注入先天优势。"
+                        )
+                    except Exception as e:
+                        logger.error(f"继承系统记录失败 {player_id}: {e}")
 
             else:
                 # 重新获取 session，确保不为 None
@@ -562,16 +1738,23 @@ async def _process_player_action_async(user_info: dict, action: str):
     except Exception as e:
         logger.error(f"Error processing action for {player_id}: {e}", exc_info=True)
         logger.error(f"Full traceback:\n{traceback.format_exc()}")
-        # 安全地更新 session
+        # ── Error recovery: show user-friendly message but do NOT pollute history ──
+        # Previously, every error appended retry instructions to internal_history
+        # and error text to display_history, causing garbage accumulation across
+        # repeated failures. Now:
+        # 1. Revert the user action that was appended to histories at line 821-822
+        #    (it was never successfully processed, so keeping it is misleading).
+        # 2. Show ONE transient error message without persisting retry instructions.
         if "session" in locals() and session:
-            session["internal_history"].extend(
-                [
-                    {
-                        "role": "system",
-                        "content": '请给出正确格式的JSON响应。\'请给出正确格式的JSON响应。必须是正确格式的json，包括narrative和（state_update或roll_request），刚才的格式错误，系统无法加载！正确输出{"key":value}\'，至少得是"{"开头吧',
-                    },
-                ]
-            )
+            # Roll back the user action we optimistically appended before the AI call
+            hist = session.get("internal_history", [])
+            if hist and hist[-1].get("role") == "user" and hist[-1].get("content") == action:
+                hist.pop()
+            disp = session.get("display_history", [])
+            if disp and disp[-1] == f"> {action}":
+                disp.pop()
+
+            # Append ONE clean error message (no retry instructions that bloat history)
             session["display_history"].append(
                 "【天机紊乱】\n\n"
                 "虚空微微震颤，汝之行动仿佛被一股无形之力化解，未能激起任何波澜。\n\n"
@@ -581,6 +1764,12 @@ async def _process_player_action_async(user_info: dict, action: str):
     finally:
         try:
             if "session" in locals() and session:
+                # Persist backend session state for hot-reload survival
+                try:
+                    ai_service.persist_backend_session(player_id, session)
+                except Exception:
+                    pass
+
                 # Periodic cheat check in `finally` to guarantee execution
                 session["unchecked_rounds_count"] = (
                     session.get("unchecked_rounds_count", 0) + 1
@@ -637,6 +1826,117 @@ async def _process_player_action_async(user_info: dict, action: str):
         logger.info(f"Async action task for {player_id} finished.")
 
 
+async def _handle_manual_end_trial(current_user: dict):
+    """
+    处理玩家主动结束试炼。
+    - 不发起 AI 调用
+    - 不生成兑换码（灵石不带出）
+    - 仍评估功德点（基于当前角色状态）
+    - 结束试炼，释放 is_processing
+    """
+    player_id = current_user["username"]
+    logger.info(f"Player {player_id} manually ending trial.")
+
+    try:
+        session = await state_manager.get_session(player_id)
+        if not session or not session.get("is_in_trial"):
+            logger.warning(f"Manual end: no active trial for {player_id}")
+            return
+
+        current_life = session.get("current_life") or {}
+        realm = current_life.get("境界", current_life.get("修为", current_life.get("修为境界", "未知")))
+
+        # 构建结束叙事
+        end_narrative = (
+            "\n\n【主动退出 · 试炼中止】\n\n"
+            "汝闭目凝神，向天道传达了退出此番试炼的意愿。\n\n"
+            "虚空微微震颤，一道温和的光芒将汝包裹。"
+            "此生的一切记忆如走马灯般在眼前掠过——\n\n"
+            f"> 最终境界：**{realm}**\n\n"
+            "天道之音响起：\n\n"
+            "> *「知进退者，亦为智者。此番因果，已铭刻于轮回长河。」*\n\n"
+            "光芒散去，汝重归试炼之门前。\n\n"
+            "---\n\n"
+            "> ⚠ 主动结束试炼不会产生灵石兑换码，但仍可获得功德点。"
+        )
+        session["display_history"].append(end_narrative)
+
+        # 结束试炼状态
+        session["is_in_trial"] = False
+        session["current_life"] = None
+        session["internal_history"] = [
+            {"role": "system", "content": GAME_MASTER_SYSTEM_PROMPT}
+        ]
+
+        # --- 继承系统：评估功德点（灵石=0，但境界/属性/道具仍可得分）---
+        try:
+            difficulty_preset = _get_difficulty_preset(session)
+            legacy_result = await legacy_system.add_legacy_points(
+                player_id,
+                spirit_stones=0,
+                session={"current_life": current_life},  # 传入结束前的角色状态
+                difficulty_multiplier=difficulty_preset["legacy_multiplier"],
+            )
+            pts = legacy_result["points_earned"]
+            total = legacy_result["total_points"]
+            lb = legacy_result.get("breakdown", {})
+            diff_name = session.get("difficulty", DEFAULT_DIFFICULTY)
+            diff_label = (
+                f"（难度: {diff_name}，系数×{difficulty_preset['legacy_multiplier']}）"
+                if diff_name != DEFAULT_DIFFICULTY
+                else ""
+            )
+            detail_parts = []
+            if lb.get("realm", 0) > 0:
+                detail_parts.append(f"境界 {lb['realm']}")
+            if lb.get("spirit_stones", 0) > 0:
+                detail_parts.append(f"灵石 {lb['spirit_stones']}")
+            if lb.get("items", 0) > 0:
+                detail_parts.append(f"道具 {lb['items']}")
+            if lb.get("attributes", 0) > 0:
+                detail_parts.append(f"属性 {lb['attributes']}")
+            detail_text = (
+                f"评分明细: {' + '.join(detail_parts)} = {lb.get('total_score', pts)}"
+                if detail_parts
+                else ""
+            )
+            if pts > 0:
+                session["display_history"].append(
+                    f"\n\n【轮回铭刻 · 功德累积】\n\n"
+                    f"虽未破碎虚空，此番修行之因果仍留痕于天道。\n\n"
+                    f"> 综合评分: **{lb.get('total_score', pts)}** {diff_label}\n"
+                    f"> {detail_text}\n"
+                    f"> 获得功德点: **{pts}**\n"
+                    f"> 累计功德点: **{total}**\n\n"
+                    f"功德点可在下一次试炼前，于【先天奖励】中兑换前世遗泽。"
+                )
+            else:
+                session["display_history"].append(
+                    "\n\n此番试炼修行尚浅，未能留下足够的因果印记，功德点未有增长。"
+                )
+        except Exception as e:
+            logger.error(f"Legacy evaluation failed on manual end for {player_id}: {e}")
+
+    except Exception as e:
+        logger.error(f"Error in manual end trial for {player_id}: {e}", exc_info=True)
+        if "session" in locals() and session:
+            session["display_history"].append(
+                "【天机紊乱】\n\n结束试炼时发生异常，但试炼已终止。"
+            )
+    finally:
+        try:
+            if "session" in locals() and session:
+                session["is_processing"] = False
+                session["roll_event"] = None
+                try:
+                    ai_service.persist_backend_session(player_id, session)
+                except Exception:
+                    pass
+                await state_manager.save_session(player_id, session)
+        except Exception as e:
+            logger.error(f"Error finalizing manual end for {player_id}: {e}")
+
+
 async def process_player_action(current_user: dict, action: str):
     player_id = current_user["username"]
     session = await state_manager.get_session(player_id)
@@ -644,8 +1944,10 @@ async def process_player_action(current_user: dict, action: str):
         logger.error(f"Action for non-existent session: {player_id}")
         return
     if session.get("is_processing"):
-        logger.warning(f"Action '{action}' blocked for {player_id}, processing.")
-        return
+        # 允许主动结束试炼穿透 is_processing 检查
+        if action.strip() != "主动结束试炼":
+            logger.warning(f"Action '{action}' blocked for {player_id}, processing.")
+            return
     if session.get("daily_success_achieved"):
         logger.warning(f"Action '{action}' blocked for {player_id}, day complete.")
         return
@@ -741,18 +2043,29 @@ async def process_player_action(current_user: dict, action: str):
         await state_manager.save_session(player_id, new_state)
         return
 
-    is_starting_trial = action in [
+    # Extract base action (strip companion mode suffix)
+    action_base = action.split(":")[0].strip() if ":" in action else action
+    is_starting_trial = action_base in [
         "开始试炼",
         "开启下一次试炼",
         "开始第一次试炼",
     ] and not session.get("is_in_trial")
+    is_manual_end = action_base == "主动结束试炼" and session.get("is_in_trial")
+
     if is_starting_trial and session["opportunities_remaining"] <= 0:
         logger.warning(f"Player {player_id} tried to start trial with 0 opportunities.")
         return
-    if not is_starting_trial and not session.get("is_in_trial"):
+    if not is_starting_trial and not is_manual_end and not session.get("is_in_trial"):
         logger.warning(
             f"Player {player_id} sent action '{action}' while not in a trial."
         )
+        return
+
+    if is_manual_end:
+        # Handle manual end directly (no AI call needed)
+        session["is_processing"] = True
+        await state_manager.save_session(player_id, session)
+        asyncio.create_task(_handle_manual_end_trial(current_user))
         return
 
     session["is_processing"] = True

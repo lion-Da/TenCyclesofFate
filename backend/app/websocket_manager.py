@@ -179,6 +179,67 @@ class ConnectionManager:
                 self._debounced_send(player_id)
             )
 
+    async def send_roll_event(self, player_id: str, roll_event: dict):
+        """
+        Send a dice roll event IMMEDIATELY to the player (no debounce).
+        This ensures the roll animation displays without waiting for state diff.
+        """
+        conn_info = self.active_connections.get(player_id)
+        if not conn_info:
+            return
+
+        websocket = conn_info["websocket"]
+        message = {
+            "type": "roll_event",
+            "data": roll_event,
+        }
+        try:
+            await self._send_compressed(websocket, message)
+            logger.info(f"Roll event sent to {player_id}: {roll_event.get('outcome', '?')}")
+        except (WebSocketDisconnect, RuntimeError) as e:
+            logger.warning(f"Roll event send failed for player '{player_id}': {e}")
+            self.disconnect(player_id)
+
+    async def send_stream_chunk(self, player_id: str, chunk: str, stream_id: str):
+        """
+        发送流式文本片段给玩家。
+        前端接收到 type='stream_chunk' 后逐步追加到当前叙事中。
+        """
+        conn_info = self.active_connections.get(player_id)
+        if not conn_info:
+            return
+        
+        websocket = conn_info["websocket"]
+        message = {
+            "type": "stream_chunk",
+            "stream_id": stream_id,
+            "content": chunk,
+        }
+        try:
+            await self._send_compressed(websocket, message)
+        except (WebSocketDisconnect, RuntimeError) as e:
+            logger.warning(f"Stream send failed for player '{player_id}': {e}")
+            self.disconnect(player_id)
+
+    async def send_stream_end(self, player_id: str, stream_id: str):
+        """
+        通知前端流式传输结束。
+        """
+        conn_info = self.active_connections.get(player_id)
+        if not conn_info:
+            return
+        
+        websocket = conn_info["websocket"]
+        message = {
+            "type": "stream_end",
+            "stream_id": stream_id,
+        }
+        try:
+            await self._send_compressed(websocket, message)
+        except (WebSocketDisconnect, RuntimeError) as e:
+            logger.warning(f"Stream end send failed for player '{player_id}': {e}")
+            self.disconnect(player_id)
+
 
 # Create a single instance of the manager to be used across the application
 manager = ConnectionManager()

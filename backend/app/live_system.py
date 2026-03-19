@@ -38,7 +38,9 @@ class LiveManager:
         """Broadcasts a state update to all viewers of a target player."""
         if target_id in self.viewers:
             viewer_list = list(self.viewers[target_id])
-            logger.info(f"Live System: Broadcasting state of '{target_id}' to {len(viewer_list)} viewers. First one is '{viewer_list[0]}'." if viewer_list else "No viewers to broadcast to.")
+            if not viewer_list:
+                return
+            logger.info(f"Live System: Broadcasting state of '{target_id}' to {len(viewer_list)} viewers.")
             for viewer_id in viewer_list:
                 # The data is the state of the *target* player
                 await websocket_manager.send_json_to_player(

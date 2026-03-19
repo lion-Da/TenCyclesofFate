@@ -24,6 +24,9 @@ def generate_and_insert_redemption_code(user_id: int, quota: float, name: str) -
     conn = None
     try:
         conn = db.get_db_connection()
+        if not conn:
+            logger.error(f"Failed to get DB connection for user '{user_id}'")
+            return None
         cursor = conn.cursor()
         
         cursor.execute(
@@ -40,8 +43,14 @@ def generate_and_insert_redemption_code(user_id: int, quota: float, name: str) -
     except Exception as e:
         logger.error(f"Failed to insert redemption code for user '{user_id}': {e}", exc_info=True)
         if conn:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         return None
     finally:
         if conn:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass

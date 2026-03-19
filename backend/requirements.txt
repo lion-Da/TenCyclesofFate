@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 pydantic-settings
 python-jose[cryptography]
-passlib[bcrypt]
+bcrypt
 openai
 python-multipart
 websockets==12.0

@@ -1,17 +1,27 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
+    # AI Backend: "openai" or "echo"
+    AI_BACKEND: str = "openai"
+
     # OpenAI API Settings
     OPENAI_API_KEY: str | None = None # Allow key to be optional to enable server startup
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_MODEL: str = "gpt-3.5-turbo"
     OPENAI_MODEL_CHEAT_CHECK: str = "qwen3-235b-a22b"
     
+    # Echo Agent API Settings (alternative to OpenAI)
+    ECHO_API_URL: str = ""              # e.g. http://172.20.80.1:8006
+    ECHO_API_KEY: str | None = None      # Authorization header value
+    ECHO_AGENT_ID: str = ""              # Agent ID for game master
+    ECHO_AGENT_ID_CHEAT: str = ""        # Agent ID for cheat check (optional, falls back to ECHO_AGENT_ID)
+    ECHO_MONGO_ID: str = "public-db"     # x-mongo-id header
+
     # Image Generation Settings (optional)
-    IMAGE_GEN_MODEL: str | None = None  # 图片生成模型，如 "gpt-image-1" 或其他兼容模型
-    IMAGE_GEN_BASE_URL: str | None = None  # 图片生成API地址，为空则使用 OPENAI_BASE_URL
-    IMAGE_GEN_API_KEY: str | None = None  # 图片生成API密钥，为空则使用 OPENAI_API_KEY
-    IMAGE_GEN_IDLE_SECONDS: int = 10  # 状态静止多少秒后触发图片生成
+    IMAGE_GEN_MODEL: str | None = None
+    IMAGE_GEN_BASE_URL: str | None = None
+    IMAGE_GEN_API_KEY: str | None = None
+    IMAGE_GEN_IDLE_SECONDS: int = 10
 
     # JWT Settings for OAuth2
     SECRET_KEY: str
@@ -25,6 +35,14 @@ class Settings(BaseSettings):
     LINUXDO_CLIENT_ID: str | None = None
     LINUXDO_CLIENT_SECRET: str | None = None
     LINUXDO_SCOPE: str = "read"
+
+    # Email Auth Settings
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 465
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_USE_SSL: bool = True
+    SMTP_FROM_NAME: str = "浮生十梦"
 
     # Server Settings
     HOST: str = "127.0.0.1"

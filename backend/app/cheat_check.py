@@ -2,7 +2,7 @@ import logging
 import asyncio
 import re
 
-from . import openai_client
+from . import ai_service
 from . import state_manager
 from .config import settings
 
@@ -77,7 +77,7 @@ async def run_cheat_check(player_id: str, inputs_to_check: list[str]) -> str:
     full_prompt = f"# 用户输入列表\n\n<user_inputs>\n{formatted_inputs}\n</user_inputs>"
 
     # Single API call for the whole batch
-    response = await openai_client.get_ai_response(
+    response = await ai_service.get_ai_response(
         prompt=full_prompt,
         history=[{"role": "system", "content": CHEAT_CHECK_SYSTEM_PROMPT}],
         model=settings.OPENAI_MODEL_CHEAT_CHECK,

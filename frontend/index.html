@@ -30,6 +30,36 @@
         <div id="login-view" class="view active">
             <h1>浮生十梦</h1>
             <p>此乃试炼之地，请先表明身份。</p>
+
+            <!-- Email Auth Forms -->
+            <div id="email-auth-container">
+                <!-- Tab Switcher -->
+                <div class="auth-tabs">
+                    <button class="auth-tab active" data-tab="login" onclick="switchAuthTab('login')">登录</button>
+                    <button class="auth-tab" data-tab="register" onclick="switchAuthTab('register')">注册</button>
+                </div>
+
+                <!-- Login Form -->
+                <div id="auth-login" class="auth-form active">
+                    <input type="email" id="login-email" placeholder="邮箱地址" autocomplete="email">
+                    <input type="password" id="login-password" placeholder="密码" autocomplete="current-password">
+                    <button class="auth-submit-btn" onclick="handleEmailLogin()">登录</button>
+                </div>
+
+                <!-- Register Form -->
+                <div id="auth-register" class="auth-form">
+                    <input type="email" id="register-email" placeholder="邮箱地址" autocomplete="email">
+                    <div class="code-row">
+                        <input type="text" id="register-code" placeholder="验证码" maxlength="6" autocomplete="one-time-code">
+                        <button class="send-code-btn" id="send-code-btn" onclick="handleSendCode()">发送验证码</button>
+                    </div>
+                    <input type="password" id="register-password" placeholder="密码（至少6位）" autocomplete="new-password">
+                    <button class="auth-submit-btn" onclick="handleEmailRegister()">注册</button>
+                </div>
+            </div>
+
+            <div class="auth-divider"><span>或</span></div>
+
             <a href="/api/login/linuxdo" class="login-button">使用 Linux.do 登录</a>
             <p id="login-error" class="error-message"></p>
         </div>
@@ -40,6 +70,12 @@
                 <h1>浮生一梦</h1>
                 <div id="game-status">
                     <span>剩余机缘: <span id="opportunities">10</span></span>
+                    <div id="speed-control" title="文字生成速度">
+                        <label id="speed-label">⚡</label>
+                        <input type="range" id="stream-speed" min="0" max="4" step="1" value="4">
+                        <span id="speed-text">适中</span>
+                    </div>
+                    <button id="end-game-button" class="header-button end-game-btn hidden" title="主动结束当前试炼">☠ 结束试炼</button>
                     <button id="fullscreen-button" class="header-button" title="全屏模式">⛶</button>
                     <button id="logout-button" class="header-button">登出</button>
                 </div>
@@ -49,6 +85,11 @@
                 <!-- Character status will be rendered here -->
                 <p>【人物业力】</p>
                 <div id="character-status"></div>
+                <!-- Social Relations Panel -->
+                <div id="social-panel" class="social-panel hidden">
+                    <p>【人物关系】</p>
+                    <div id="social-relations"></div>
+                </div>
             </aside>
 
             <main id="main-content">
@@ -63,7 +104,24 @@
                     <button id="action-button" disabled>定</button>
                 </div>
                 <button id="start-trial-button" class="hidden">开启下一次试炼</button>
+                <button id="legacy-toggle" class="legacy-toggle-btn hidden">✦ 先天奖励</button>
             </footer>
+
+        </div>
+
+        <!-- Legacy System Panel (overlay on top of app-container) -->
+        <div id="legacy-panel" class="hidden legacy-panel-overlay">
+            <div class="legacy-panel-content">
+                <div class="legacy-header">
+                    <h2>【轮回遗泽 · 先天奖励】</h2>
+                    <p>功德点: <span id="legacy-points" class="legacy-points-value">0</span></p>
+                    <p class="legacy-hint">消耗功德点为下一次试炼的新生角色注入前世遗泽</p>
+                </div>
+                <div id="blessings-list" class="blessings-list">
+                    <!-- Blessings will be rendered here -->
+                </div>
+                <button class="legacy-close-btn" id="legacy-close-btn">关闭</button>
+            </div>
         </div>
 
         <!-- Loading Spinner -->
@@ -71,17 +129,81 @@
             <div class="spinner"></div>
         </div>
 
+        <!-- Trial Config Dialog (Companion + Difficulty) -->
+        <div id="companion-dialog" class="hidden">
+            <div id="companion-panel">
+                <div class="companion-title">踏入轮回之前……</div>
+
+                <!-- Difficulty Selection -->
+                <div class="config-section">
+                    <div class="config-section-title">天道难度</div>
+                    <div class="difficulty-choices" id="difficulty-choices">
+                        <button class="difficulty-btn" data-difficulty="气运之父" title="Roll点必成功，属性下限60，无法获得继承点">
+                            <span class="btn-icon">🌟</span>
+                            <span class="btn-label">气运之父</span>
+                            <span class="btn-hint">判定必成功 · 属性≥60 · 无继承点</span>
+                        </button>
+                        <button class="difficulty-btn" data-difficulty="气运之子" title="Roll成功率+50%，属性50-80，继承点×0.5">
+                            <span class="btn-icon">🍀</span>
+                            <span class="btn-label">气运之子</span>
+                            <span class="btn-hint">成功率+50% · 属性50~80 · 继承点×0.5</span>
+                        </button>
+                        <button class="difficulty-btn selected" data-difficulty="凡人修仙" title="正常模式">
+                            <span class="btn-icon">⚔️</span>
+                            <span class="btn-label">凡人修仙</span>
+                            <span class="btn-hint">正常难度 · 标准继承点</span>
+                        </button>
+                        <button class="difficulty-btn" data-difficulty="绝处逢生" title="Roll成功率-25%，属性上限30，继承点×1.5">
+                            <span class="btn-icon">💀</span>
+                            <span class="btn-label">绝处逢生</span>
+                            <span class="btn-hint">成功率-25% · 属性≤30 · 继承点×1.5</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Companion Selection -->
+                <div class="config-section">
+                    <div class="config-section-title">同行之缘</div>
+                    <div class="companion-desc">独行者，孤剑破万敌；结伴者，同舟共济渡劫波。</div>
+                    <div class="companion-choices">
+                        <button id="btn-companion-solo" class="companion-btn solo">
+                            <span class="btn-icon">🗡️</span>
+                            <span class="btn-label">独行</span>
+                            <span class="btn-hint">不生成初始伙伴，走独狼路线</span>
+                        </button>
+                        <button id="btn-companion-party" class="companion-btn party">
+                            <span class="btn-icon">👥</span>
+                            <span class="btn-label">结伴同行</span>
+                            <span class="btn-hint">生成1-3位初始伙伴，开启好感度系统</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Roll Animation Overlay -->
         <div id="roll-overlay" class="hidden">
             <div id="roll-panel">
-                <div class="dice-cup">🎲</div>
-                <div id="roll-details">
+                <div id="roll-header">
                     <span id="roll-type"></span>
-                    <span id="roll-target"></span>
+                </div>
+                <div id="roll-breakdown" class="hidden">
+                    <div class="breakdown-title">成功率计算</div>
+                    <div id="breakdown-items"></div>
+                    <div class="breakdown-final">
+                        最终成功率: <span id="breakdown-final-rate"></span>%
+                        <span class="breakdown-cap">(上限95%)</span>
+                    </div>
+                </div>
+                <div id="roll-dice-area">
+                    <div class="dice-cup">🎲</div>
+                    <div id="roll-dice-number" class="hidden"></div>
                 </div>
                 <div id="roll-result-display" class="hidden">
                     <span id="roll-outcome"></span>
-                    <span id="roll-value"></span>
+                    <div id="roll-summary">
+                        D<span id="roll-sides"></span> 投出 <span id="roll-value"></span> / 需要 ≤ <span id="roll-target"></span>
+                    </div>
                 </div>
             </div>
         </div>

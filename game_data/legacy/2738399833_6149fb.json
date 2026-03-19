@@ -1,0 +1,27 @@
+{
+  "player_id": "2738399833_6149fb",
+  "legacy_points": 28,
+  "total_earned": 28,
+  "total_spent": 0,
+  "runs_completed": 1,
+  "best_spirit_stones": 0,
+  "history": [
+    {
+      "date": "2026-03-19 17:38:52",
+      "spirit_stones": 0,
+      "points_earned": 28,
+      "total_after": 28,
+      "breakdown": {
+        "realm": 0,
+        "realm_level": 0,
+        "spirit_stones": 0,
+        "items": 17,
+        "attributes": 11,
+        "total_score": 28,
+        "difficulty_multiplier": 1.0,
+        "final_points": 28
+      }
+    }
+  ],
+  "active_blessings": []
+}
