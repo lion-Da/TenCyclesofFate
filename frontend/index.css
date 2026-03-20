@@ -674,6 +674,84 @@ body.app-fullscreen #app-container {
     box-shadow: none;
 }
 
+/* --- Processing State (AI working) --- */
+#action-input.processing {
+    background: linear-gradient(90deg, #e9e9e9 0%, #f5f0e8 50%, #e9e9e9 100%);
+    background-size: 200% 100%;
+    animation: processing-shimmer 2s ease-in-out infinite;
+    border-color: var(--primary-color);
+    color: #888;
+}
+
+#action-input.processing::placeholder {
+    color: #8a7e6a;
+    font-style: italic;
+}
+
+@keyframes processing-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* --- Toast Notifications --- */
+#toast-container {
+    position: fixed;
+    top: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    pointer-events: none;
+}
+
+.toast {
+    padding: 0.8rem 1.5rem;
+    border-radius: 8px;
+    font-family: var(--font-sans);
+    font-size: 0.95rem;
+    color: #fff;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+    opacity: 0;
+    transform: translateY(-20px);
+    animation: toast-in 0.4s ease forwards;
+    pointer-events: auto;
+    max-width: 420px;
+    text-align: center;
+    line-height: 1.5;
+}
+
+.toast.toast-error {
+    background: linear-gradient(135deg, #8b3a3a, #a04040);
+    border: 1px solid #c46060;
+}
+
+.toast.toast-warning {
+    background: linear-gradient(135deg, #8b6f3a, #a08040);
+    border: 1px solid #c4a060;
+}
+
+.toast.toast-info {
+    background: linear-gradient(135deg, #3a6f8b, #408090);
+    border: 1px solid #60a0c4;
+}
+
+.toast.toast-out {
+    animation: toast-out 0.4s ease forwards;
+}
+
+@keyframes toast-in {
+    from { opacity: 0; transform: translateY(-20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes toast-out {
+    from { opacity: 1; transform: translateY(0); }
+    to { opacity: 0; transform: translateY(-20px); }
+}
+
 /* --- Overlays & Spinners --- */
 .hidden { display: none !important; }
 

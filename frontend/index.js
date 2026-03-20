@@ -8,6 +8,17 @@ const appState = {
     legacyData: null,       // 继承系统数据
 };
 
+// --- Processing / Error Tracking ---
+const processingState = {
+    safetyTimer: null,          // 安全超时计时器（防止永远卡在 is_processing）
+    processingStartTime: 0,     // 开始处理的时间戳
+    consecutiveErrors: 0,       // 连续错误次数
+    SAFETY_TIMEOUT_MS: 180000,  // 3分钟安全超时
+    PLACEHOLDER_PROCESSING: '世界演化中...',
+    PLACEHOLDER_DEFAULT: '汝欲何为...',
+    PLACEHOLDER_ERROR: '天机已恢复，请重新输入...',
+};
+
 // --- Streaming State ---
 const streamState = {
     activeStreamId: null,       // 当前正在接收的流ID
@@ -180,11 +191,21 @@ const socketManager = {
                         handleStreamEnd(message);
                         break;
                     case 'error':
-                        alert(`WebSocket Error: ${message.detail}`);
+                        showToast(`⚠ ${message.detail || '连接异常'}`, 'error', 6000);
+                        // 错误发生后确保输入不被锁定
+                        if (appState.gameState && appState.gameState.is_processing) {
+                            appState.gameState.is_processing = false;
+                            showLoading(false);
+                        }
                         break;
                 }
             };
-            this.socket.onclose = () => { console.log("Reconnecting..."); showLoading(true); setTimeout(() => this.connect(), 5000); };
+            this.socket.onclose = () => {
+                console.log("Reconnecting...");
+                _clearSafetyTimeout();
+                showLoading(true);
+                setTimeout(() => this.connect(), 5000);
+            };
             this.socket.onerror = (error) => { console.error("WebSocket error:", error); DOMElements.loginError.textContent = '无法连接。'; reject(error); };
         });
     },
@@ -432,13 +453,113 @@ function showLoading(isLoading) {
     
     if (buttonsDisabled && appState.gameState) {
         DOMElements.actionButton.textContent = '⏳';
+        // 设置处理中占位文本和样式
+        DOMElements.actionInput.placeholder = processingState.PLACEHOLDER_PROCESSING;
+        DOMElements.actionInput.classList.add('processing');
+        // 启动安全超时（防止永远卡住）
+        _startSafetyTimeout();
     } else {
         DOMElements.actionButton.textContent = '定';
+        DOMElements.actionInput.classList.remove('processing');
+        // 取消安全超时
+        _clearSafetyTimeout();
+        // 根据是否刚经历过错误来设置占位文本
+        if (processingState.consecutiveErrors > 0) {
+            DOMElements.actionInput.placeholder = processingState.PLACEHOLDER_ERROR;
+            // 2秒后恢复默认提示
+            setTimeout(() => {
+                DOMElements.actionInput.placeholder = processingState.PLACEHOLDER_DEFAULT;
+            }, 3000);
+        } else {
+            DOMElements.actionInput.placeholder = processingState.PLACEHOLDER_DEFAULT;
+        }
+    }
+}
+
+// --- Safety Timeout ---
+// 防止后端异常导致 is_processing 永远为 true，玩家被永久锁定
+function _startSafetyTimeout() {
+    if (processingState.safetyTimer) return; // 已有计时器
+    processingState.processingStartTime = Date.now();
+    processingState.safetyTimer = setTimeout(() => {
+        // 超时强制解锁输入
+        console.warn('Safety timeout: force-unlocking input after', processingState.SAFETY_TIMEOUT_MS, 'ms');
+        if (appState.gameState) {
+            appState.gameState.is_processing = false;
+        }
+        showLoading(false);
+        showToast('天道运转似有阻滞，输入已恢复。若无响应请刷新页面。', 'warning', 8000);
+    }, processingState.SAFETY_TIMEOUT_MS);
+}
+
+function _clearSafetyTimeout() {
+    if (processingState.safetyTimer) {
+        clearTimeout(processingState.safetyTimer);
+        processingState.safetyTimer = null;
+    }
+    processingState.processingStartTime = 0;
+}
+
+// --- Toast Notification System ---
+function showToast(message, type = 'info', duration = 5000) {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+    
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+    
+    // 自动消失
+    const dismissTimer = setTimeout(() => {
+        toast.classList.add('toast-out');
+        toast.addEventListener('animationend', () => toast.remove());
+    }, duration);
+    
+    // 点击提前关闭
+    toast.addEventListener('click', () => {
+        clearTimeout(dismissTimer);
+        toast.classList.add('toast-out');
+        toast.addEventListener('animationend', () => toast.remove());
+    });
+}
+
+// --- AI Error Detection ---
+// 检测 display_history 中的连续错误并通知玩家
+let _lastCheckedHistoryLen = 0;
+
+function _detectAiErrors() {
+    const history = appState.gameState?.display_history || [];
+    const currentLen = history.length;
+    
+    // 仅在有新消息时检查
+    if (currentLen <= _lastCheckedHistoryLen) return;
+    
+    const latestMsg = history[currentLen - 1] || '';
+    _lastCheckedHistoryLen = currentLen;
+    
+    if (latestMsg.includes('天机紊乱')) {
+        processingState.consecutiveErrors++;
+        
+        if (processingState.consecutiveErrors === 1) {
+            showToast('⚠ 天道运转出现波动，请稍后再试', 'warning', 5000);
+        } else if (processingState.consecutiveErrors === 2) {
+            showToast('⚠ 天机再次紊乱，大模型服务可能暂时不稳定', 'error', 6000);
+        } else if (processingState.consecutiveErrors >= 3) {
+            showToast('❌ 大模型服务持续异常（连续 ' + processingState.consecutiveErrors + ' 次），建议稍后再试或刷新页面', 'error', 10000);
+        }
+    } else if (latestMsg && !latestMsg.startsWith('> ')) {
+        // 收到正常AI回复，重置错误计数
+        processingState.consecutiveErrors = 0;
     }
 }
 
 function render() {
     if (!appState.gameState) { showLoading(true); return; }
+    
+    // --- 错误检测：检查最新消息是否为"天机紊乱" ---
+    _detectAiErrors();
+    
     showLoading(appState.gameState.is_processing);
     DOMElements.opportunitiesSpan.textContent = appState.gameState.opportunities_remaining;
     renderCharacterStatus();
@@ -881,6 +1002,9 @@ async function initializeGame() {
     try {
         const initialState = await api.initGame();
         appState.gameState = initialState;
+        // 跳过历史记录中已有的消息，仅对后续新增消息做错误检测
+        _lastCheckedHistoryLen = (initialState.display_history || []).length;
+        processingState.consecutiveErrors = 0;
         render();
         showView('game-view');
         await socketManager.connect();
