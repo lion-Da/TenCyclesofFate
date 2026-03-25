@@ -17,11 +17,18 @@ class Settings(BaseSettings):
     ECHO_AGENT_ID_CHEAT: str = ""        # Agent ID for cheat check (optional, falls back to ECHO_AGENT_ID)
     ECHO_MONGO_ID: str = "public-db"     # x-mongo-id header
 
+    # Echo Skills Settings (optional — requires AI_BACKEND="echo")
+    ECHO_SKILLS_ENABLED: bool = False    # Master switch for Skills feature
+    ECHO_SKILLS_DIR: str = ""            # Custom skills directory (leave empty for default)
+
     # Image Generation Settings (optional)
     IMAGE_GEN_MODEL: str | None = None
     IMAGE_GEN_BASE_URL: str | None = None
     IMAGE_GEN_API_KEY: str | None = None
     IMAGE_GEN_IDLE_SECONDS: int = 10
+
+    # AI Rate Limiting
+    AI_RPM: int = 40  # Max AI API requests per minute (across all players)
 
     # JWT Settings for OAuth2
     SECRET_KEY: str

@@ -135,3 +135,6 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 game_data.json
+game_data/sessions/2738399833_6149fb/display_history.jsonl
+*.jsonl
+game_data/sessions/2738399833_6149fb/meta.json

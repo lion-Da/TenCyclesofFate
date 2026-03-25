@@ -17,6 +17,8 @@ const processingState = {
     PLACEHOLDER_PROCESSING: '世界演化中...',
     PLACEHOLDER_DEFAULT: '汝欲何为...',
     PLACEHOLDER_ERROR: '天机已恢复，请重新输入...',
+    // Queue status (persisted across re-renders)
+    lastQueueStatus: null,      // { position, total, etaText }
 };
 
 // --- Streaming State ---
@@ -190,6 +192,9 @@ const socketManager = {
                     case 'stream_end':
                         handleStreamEnd(message);
                         break;
+                    case 'queue_status':
+                        handleQueueStatus(message);
+                        break;
                     case 'error':
                         showToast(`⚠ ${message.detail || '连接异常'}`, 'error', 6000);
                         // 错误发生后确保输入不被锁定
@@ -334,6 +339,79 @@ function handleStreamEnd(message) {
     }
 }
 
+// --- Queue Status Handler ---
+function handleQueueStatus(message) {
+    const { position, total, eta_seconds } = message;
+    
+    if (position <= 0) {
+        // We've been granted our slot — hide queue indicator
+        processingState.lastQueueStatus = null;
+        _hideQueueIndicator();
+        return;
+    }
+    
+    // Update the processing placeholder with queue info
+    const etaText = eta_seconds <= 5
+        ? '即将开始'
+        : eta_seconds <= 60
+            ? `约${Math.ceil(eta_seconds)}秒`
+            : `约${Math.ceil(eta_seconds / 60)}分钟`;
+    
+    const queueText = total > 1
+        ? `排队中（第${position}/${total}位，${etaText}）...`
+        : `等待天道响应中（${etaText}）...`;
+    
+    DOMElements.actionInput.placeholder = queueText;
+    
+    // Save for re-render persistence
+    processingState.lastQueueStatus = { position, total, etaText };
+    
+    // Also show/update a queue indicator banner in the narrative window
+    _showQueueIndicator(position, total, etaText);
+}
+
+function _showQueueIndicator(position, total, etaText) {
+    let indicator = document.getElementById('queue-indicator');
+    if (!indicator) {
+        indicator = document.createElement('div');
+        indicator.id = 'queue-indicator';
+        indicator.className = 'queue-indicator';
+        // Insert before the narrative window's last child or append
+        DOMElements.narrativeWindow.appendChild(indicator);
+    }
+    
+    if (total > 1) {
+        indicator.innerHTML = `
+            <div class="queue-indicator-inner">
+                <span class="queue-spinner">⏳</span>
+                <span>天道繁忙 · 排队等待中</span>
+                <span class="queue-position">第 <strong>${position}</strong> / ${total} 位</span>
+                <span class="queue-eta">预计${etaText}</span>
+            </div>
+        `;
+    } else {
+        indicator.innerHTML = `
+            <div class="queue-indicator-inner">
+                <span class="queue-spinner">⏳</span>
+                <span>世界演化中 · ${etaText}</span>
+            </div>
+        `;
+    }
+    
+    // Auto-scroll to show the indicator
+    if (!scrollState.isUserScrolling) {
+        DOMElements.narrativeWindow.scrollTop = DOMElements.narrativeWindow.scrollHeight;
+    }
+}
+
+function _hideQueueIndicator() {
+    processingState.lastQueueStatus = null;
+    const indicator = document.getElementById('queue-indicator');
+    if (indicator) {
+        indicator.remove();
+    }
+}
+
 // --- UI & Rendering ---
 function showView(viewId) {
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
@@ -347,6 +425,53 @@ function renderMarkdownSafe(markdownText) {
         FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "link", "meta"],
         FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover", "onfocus", "onmouseenter", "onmouseleave", "style"],
     });
+}
+
+/**
+ * 从消息文本中提取 <!--error-details:BASE64--> 标记，
+ * 返回 { cleanText, detailsHtml }。
+ * - cleanText: 去除标记后的文本，用于正常 markdown 渲染
+ * - detailsHtml: 若存在错误详情，返回可折叠面板的 HTML 字符串；否则为空
+ */
+function extractErrorDetails(text) {
+    const pattern = /<!--error-details:([A-Za-z0-9+/=]+)-->/;
+    const match = text.match(pattern);
+    if (!match) {
+        return { cleanText: text, detailsHtml: '' };
+    }
+
+    const cleanText = text.replace(pattern, '').trim();
+    let detailsHtml = '';
+
+    try {
+        const decoded = atob(match[1]);
+        // atob 返回 latin1，需要用 TextDecoder 处理 UTF-8
+        const bytes = Uint8Array.from(decoded, c => c.charCodeAt(0));
+        const jsonStr = new TextDecoder('utf-8').decode(bytes);
+        const info = JSON.parse(jsonStr);
+
+        const rawText = (info.raw || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const errorMsg = (info.error || '未知错误').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+        detailsHtml = `
+            <details class="error-details-panel">
+                <summary class="error-details-summary">📜 查看天机原文（调试详情）</summary>
+                <div class="error-details-content">
+                    <div class="error-details-section">
+                        <strong>⚠ 错误原因：</strong>
+                        <pre class="error-details-reason">${errorMsg}</pre>
+                    </div>
+                    <div class="error-details-section">
+                        <strong>📖 大模型原始返回：</strong>
+                        <pre class="error-details-raw">${rawText}</pre>
+                    </div>
+                </div>
+            </details>`;
+    } catch (e) {
+        console.warn('Failed to decode error details:', e);
+    }
+
+    return { cleanText, detailsHtml };
 }
 
 // --- Smooth Scroll Functions ---
@@ -561,13 +686,21 @@ function render() {
     _detectAiErrors();
     
     showLoading(appState.gameState.is_processing);
+    
+    // 当处理结束时，清除排队指示器
+    if (!appState.gameState.is_processing) {
+        _hideQueueIndicator();
+    }
+    
     DOMElements.opportunitiesSpan.textContent = appState.gameState.opportunities_remaining;
     renderCharacterStatus();
 
     const historyContainer = document.createDocumentFragment();
     (appState.gameState.display_history || []).forEach(text => {
         const p = document.createElement('div');
-        p.innerHTML = renderMarkdownSafe(text);
+        // 提取错误详情标记（如有），分离干净文本和折叠面板
+        const { cleanText, detailsHtml } = extractErrorDetails(text);
+        p.innerHTML = renderMarkdownSafe(cleanText) + detailsHtml;
         if (text.startsWith('> ')) p.classList.add('user-input-message');
         else if (text.startsWith('【')) p.classList.add('system-message');
         historyContainer.appendChild(p);
@@ -579,6 +712,12 @@ function render() {
     DOMElements.narrativeWindow.appendChild(historyContainer);
     if (activeStreamEl && streamState.activeStreamId) {
         DOMElements.narrativeWindow.appendChild(activeStreamEl);
+    }
+    
+    // 恢复排队指示器（如果仍在排队中）
+    if (processingState.lastQueueStatus && appState.gameState.is_processing) {
+        const { position, total, etaText } = processingState.lastQueueStatus;
+        _showQueueIndicator(position, total, etaText);
     }
     
     // 首次渲染直接跳到底部，之后使用平滑滚动

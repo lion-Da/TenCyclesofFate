@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from . import auth, game_logic, state_manager, security, legacy_system, email_auth
 from .websocket_manager import manager as websocket_manager
 from .live_system import live_manager
+from .request_queue import queue as request_queue
 from .config import settings
 
 # --- Logging Configuration ---
@@ -29,8 +30,10 @@ async def lifespan(app: FastAPI):
     logging.info("Application startup...")
     await state_manager.init_storage()
     state_manager.start_auto_save_task()
+    request_queue.start()
     yield
     logging.info("Application shutdown...")
+    request_queue.stop()
     await state_manager.shutdown_storage()
 
 # --- FastAPI App Instance ---
@@ -247,9 +250,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect:
         websocket_manager.disconnect(username)
+        request_queue.cancel(username)
     except Exception as e:
         logger.error(f"WebSocket error for {username}: {e}", exc_info=True)
         websocket_manager.disconnect(username)
+        request_queue.cancel(username)
 
 @api_router.websocket("/live/ws")
 async def live_websocket_endpoint(websocket: WebSocket):

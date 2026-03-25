@@ -5,6 +5,7 @@ import json
 import asyncio
 import time
 import traceback
+import base64
 from copy import deepcopy
 from datetime import date
 from pathlib import Path
@@ -1092,7 +1093,7 @@ async def _parse_with_continuation(
     1. Try parse directly
     2. If truncated -> ask AI to continue (up to max_continuations times)
     3. If still truncated -> attempt structural JSON repair
-    4. If all fails -> raise
+    4. If all fails -> 将 AI 原始文本作为明文 narrative 返回（永不抛出异常）
     """
     combined = raw_response
 
@@ -1105,20 +1106,11 @@ async def _parse_with_continuation(
             f"Response contains no JSON at all ({len(combined)} chars). "
             f"Model likely ignored system prompt. First 200: {combined[:200]}"
         )
-        # Use the raw text as narrative so the player sees something
-        fallback_narrative = combined.strip()
-        if len(fallback_narrative) > 10:
-            return {
-                "narrative": (
-                    "【天机偶有紊乱】\n\n"
-                    "天道回应出现偏差，星君正在重新梳理因果脉络……\n\n"
-                    "请再次尝试你的行动。"
-                ),
-                "state_update": {}
-            }
-        raise json.JSONDecodeError(
-            "Response contains no JSON structure at all",
-            combined[:200], 0
+        # 最终手段：将 AI 的原始文本作为明文 narrative 输出
+        return _build_plaintext_fallback(
+            combined,
+            context="非JSON响应",
+            error_reason="AI返回内容中不包含任何JSON结构",
         )
 
     # ── Step 1: direct parse ──
@@ -1199,24 +1191,16 @@ async def _parse_with_continuation(
         except (json.JSONDecodeError, Exception) as e:
             logger.warning(f"JSON repair failed to parse: {e}")
 
-    # ── Step 4: all strategies exhausted ──
+    # ── Step 4: all strategies exhausted — 最终手段：明文输出 ──
     logger.error(
         f"All parse strategies failed ({len(combined)} chars). "
         f"First 500: {combined[:500]}"
     )
-    # Last resort: extract whatever we can and build a minimal valid response
-    # to avoid crashing the game loop
-    narrative_text = _extract_narrative_from_broken_json(combined)
-    if narrative_text and len(narrative_text) > 20:
-        logger.info(f"Salvaged {len(narrative_text)} chars of narrative from broken JSON")
-        return {
-            "narrative": narrative_text,
-            "state_update": {}
-        }
-
-    raise json.JSONDecodeError(
-        "All parsing strategies failed (direct, continuation, repair, salvage)",
-        combined[:200], 0
+    # 不再抛出异常！将 AI 的原始响应作为明文 narrative 返回给玩家
+    return _build_plaintext_fallback(
+        combined,
+        context="JSON解析失败",
+        error_reason="所有JSON解析策略均失败（直接解析、续写、结构修复、narrative抢救）",
     )
 
 
@@ -1233,6 +1217,74 @@ def _extract_narrative_from_broken_json(text: str) -> str | None:
             if decoded and len(decoded) > 10:
                 return decoded
     return None
+
+
+def _build_error_detail_tag(raw_ai_text: str, error_reason: str) -> str:
+    """
+    构造一个 HTML 注释标记，嵌入到 display_history 条目末尾。
+    前端检测到此标记后，可渲染为可展开的详情面板。
+
+    格式: <!--error-details:BASE64-->
+    BASE64 解码后是 JSON: {"raw": "...", "error": "..."}
+    """
+    detail = json.dumps({
+        "raw": (raw_ai_text or "")[:5000],  # 限制长度，避免过大
+        "error": (error_reason or "未知错误")[:500],
+    }, ensure_ascii=False)
+    encoded = base64.b64encode(detail.encode("utf-8")).decode("ascii")
+    return f"<!--error-details:{encoded}-->"
+
+
+def _build_plaintext_fallback(
+    raw_text: str,
+    context: str = "",
+    error_reason: str = "",
+) -> dict:
+    """
+    最终兜底：当所有 JSON 解析策略都失败时——
+
+    1. 主显文字保持友好的「天机紊乱」提示
+    2. 尝试从残破 JSON 中抢救 narrative；若抢救成功则直接展示（无需错误提示）
+    3. 若无法抢救，则将 AI 原始返回 + 报错原因嵌入为可展开详情标记，
+       前端允许玩家点击查看完整内容
+    """
+    # ── 空内容兜底 ──
+    if not raw_text or not raw_text.strip():
+        return {
+            "narrative": (
+                "【天机紊乱】\n\n"
+                "天道回应化为虚无，未能传达任何信息。请稍候再试。"
+            ),
+            "state_update": {}
+        }
+
+    # ── 抢救：尝试从残破 JSON 中提取 narrative ──
+    salvaged = _extract_narrative_from_broken_json(raw_text)
+    if salvaged and len(salvaged) > 20:
+        logger.info(
+            f"Plaintext fallback: salvaged {len(salvaged)} chars of narrative from broken JSON"
+        )
+        return {
+            "narrative": salvaged,
+            "state_update": {}
+        }
+
+    # ── 无法抢救：显示友好提示 + 附带可展开详情 ──
+    error_tag = _build_error_detail_tag(raw_text, error_reason or context)
+    context_hint = f"（{context}）" if context else ""
+    logger.info(
+        f"Plaintext fallback{context_hint}: attaching {len(raw_text)} chars "
+        f"as expandable error detail"
+    )
+    return {
+        "narrative": (
+            f"【天机紊乱】{context_hint}\n\n"
+            "虚空微微震颤，天道之语未能正确传达。\n\n"
+            "请再次尝试你的行动。\n\n"
+            f"{error_tag}"
+        ),
+        "state_update": {}
+    }
 
 
 async def _get_ai_response_streaming(
@@ -1534,6 +1586,8 @@ async def _process_player_action_async(user_info: dict, action: str):
 
         session_copy = deepcopy(session)
         session_copy.pop("internal_history", 0)
+        # ── 移除 difficulty 字段，避免 AI 看到"气运之父/子"等词汇 ──
+        session_copy.pop("difficulty", None)
         session_copy["display_history"] = (
             "\n".join(session_copy.get("display_history", []))
         )[-300:]
@@ -1550,7 +1604,17 @@ async def _process_player_action_async(user_info: dict, action: str):
         )
 
         # Update histories with user action first
-        session["internal_history"].append({"role": "user", "content": action})
+        # ── 重要：不要把难度名称（如"气运之父""气运之子"）泄露给 AI，
+        #    否则 AI 会据此生成与"气运"相关的天赋，污染初始天赋随机性。
+        #    只保留 "开始试炼" 和同行模式，难度仅在后端代码层面生效。
+        if is_starting_trial and ":" in action:
+            # 原 action 形如 "开始试炼:独行:气运之父"
+            # 清洗后只保留 "开始试炼:独行" 或 "开始试炼:同行"
+            parts = action.split(":")
+            sanitized_action = ":".join(parts[:2])  # "开始试炼:独行"
+            session["internal_history"].append({"role": "user", "content": sanitized_action})
+        else:
+            session["internal_history"].append({"role": "user", "content": action})
         session["display_history"].append(f"> {action}")
 
         await state_manager.save_session(player_id, session)
@@ -1609,17 +1673,30 @@ async def _process_player_action_async(user_info: dict, action: str):
                 first_narrative,
                 internal_history=session["internal_history"],  # Pass updated history
             )
-            final_json_str = _extract_json_from_response(final_ai_json_str)
-            if not final_json_str:
-                raise json.JSONDecodeError(
-                    "No JSON in second-stage", final_ai_json_str, 0
+            # 4. Parse second-stage AI response (with plaintext fallback)
+            try:
+                final_json_str = _extract_json_from_response(final_ai_json_str)
+                if not final_json_str:
+                    raise json.JSONDecodeError(
+                        "No JSON in second-stage", final_ai_json_str[:200] if final_ai_json_str else "", 0
+                    )
+                final_response_data = _robust_json_loads(final_json_str)
+            except (json.JSONDecodeError, Exception) as e:
+                logger.warning(
+                    f"Roll second-stage JSON parse failed: {e}. "
+                    f"Using plaintext fallback for {len(final_ai_json_str)} chars."
                 )
-            final_response_data = _robust_json_loads(final_json_str)
+                final_response_data = _build_plaintext_fallback(
+                    final_ai_json_str,
+                    context="判定后叙事",
+                    error_reason=str(e),
+                )
 
-            # 4. Process final response
-            narrative = final_response_data.get("narrative", "AI响应格式错误，请重试")
+            # 5. Process final response
+            narrative = final_response_data.get("narrative", "")
             state_update = final_response_data.get("state_update", {})
-            session = _apply_state_update(session, state_update)
+            if state_update:
+                session = _apply_state_update(session, state_update)
             session["display_history"].extend([roll_event["result_text"], narrative])
             session["internal_history"].extend(
                 [
@@ -1627,32 +1704,16 @@ async def _process_player_action_async(user_info: dict, action: str):
                     {"role": "assistant", "content": final_ai_json_str},
                 ]
             )
-            # ── 不再单独流式推送 roll 后的 narrative ──
-            # narrative 已通过 display_history 添加，save_session 会触发
-            # full_state → render() 自动渲染。额外的流式推送会导致重复显示。
-            if narrative == "AI响应格式错误，请重试":
-                session["internal_history"].append(
-                    {
-                        "role": "system",
-                        "content": '请给出正确格式的JSON响应。必须是正确格式的json，包括narrative和state_update或roll_request，刚才的格式错误，系统无法加载！正确输出{"key":value}',
-                    },
-                )
         else:
             # --- NO ROLL PATH ---
-            narrative = ai_response_data.get("narrative", "AI响应格式错误，请重试")
+            narrative = ai_response_data.get("narrative", "")
             state_update = ai_response_data.get("state_update", {})
-            session = _apply_state_update(session, state_update)
+            if state_update:
+                session = _apply_state_update(session, state_update)
             session["display_history"].append(narrative)
             session["internal_history"].append(
                 {"role": "assistant", "content": ai_json_response_str}
             )
-            if narrative == "AI响应格式错误，请重试":
-                session["internal_history"].append(
-                    {
-                        "role": "system",
-                        "content": '请给出正确格式的JSON响应。必须是正确格式的json，包括narrative和(state_update或roll_request)，刚才的格式错误，系统无法加载！正确输出{"key":value}，至少得是"{"开头吧',
-                    },
-                )
 
         # --- 社交系统：展示好感度变动消息 ---
         social_messages = session.pop("_social_messages", [])
@@ -1788,18 +1849,34 @@ async def _process_player_action_async(user_info: dict, action: str):
         if "session" in locals() and session:
             # Roll back the user action we optimistically appended before the AI call
             hist = session.get("internal_history", [])
-            if hist and hist[-1].get("role") == "user" and hist[-1].get("content") == action:
-                hist.pop()
+            if hist and hist[-1].get("role") == "user":
+                last_content = hist[-1].get("content", "")
+                # 匹配原始 action 或清洗后的 sanitized_action
+                if last_content == action or action.startswith(last_content):
+                    hist.pop()
             disp = session.get("display_history", [])
             if disp and disp[-1] == f"> {action}":
                 disp.pop()
 
-            # Append ONE clean error message (no retry instructions that bloat history)
-            session["display_history"].append(
-                "【天机紊乱】\n\n"
-                "虚空微微震颤，汝之行动仿佛被一股无形之力化解，未能激起任何波澜。\n\n"
-                "天道运转偶有滞涩，此非汝之过。请稍候片刻，再作尝试。"
-            )
+            # ── 最终手段：如果 AI 有返回内容，将其作为明文展示给玩家 ──
+            raw_ai_text = locals().get("ai_json_response_str", "")
+            if raw_ai_text and len(raw_ai_text.strip()) > 20:
+                fallback = _build_plaintext_fallback(
+                    raw_ai_text,
+                    context="异常恢复",
+                    error_reason=str(locals().get("e", "未知异常")),
+                )
+                session["display_history"].append(fallback["narrative"])
+                logger.info(
+                    f"Error recovery: showed {len(raw_ai_text)} chars of AI raw text "
+                    f"as plaintext fallback for {player_id}"
+                )
+            else:
+                session["display_history"].append(
+                    "【天机紊乱】\n\n"
+                    "虚空微微震颤，汝之行动仿佛被一股无形之力化解，未能激起任何波澜。\n\n"
+                    "天道运转偶有滞涩，此非汝之过。请稍候片刻，再作尝试。"
+                )
 
     finally:
         try:

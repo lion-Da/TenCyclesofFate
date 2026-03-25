@@ -752,6 +752,55 @@ body.app-fullscreen #app-container {
     to { opacity: 0; transform: translateY(-20px); }
 }
 
+/* --- Queue Indicator --- */
+.queue-indicator {
+    margin: 1rem 0;
+    padding: 0.8rem 1.2rem;
+    background: linear-gradient(135deg, rgba(106,139,106,0.08), rgba(106,139,106,0.15));
+    border: 1px solid rgba(106,139,106,0.3);
+    border-radius: 8px;
+    text-align: center;
+    animation: queue-pulse 2s ease-in-out infinite;
+}
+
+.queue-indicator-inner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.8rem;
+    flex-wrap: wrap;
+    font-size: 0.95rem;
+    color: #5a7a5a;
+    font-family: var(--font-sans);
+}
+
+.queue-spinner {
+    animation: queue-spin 1.5s linear infinite;
+    font-size: 1.1rem;
+}
+
+.queue-position {
+    background: rgba(106,139,106,0.15);
+    padding: 0.2rem 0.6rem;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+.queue-eta {
+    color: #8a7e6a;
+    font-size: 0.85rem;
+}
+
+@keyframes queue-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
+@keyframes queue-spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
 /* --- Overlays & Spinners --- */
 .hidden { display: none !important; }
 
@@ -1383,4 +1432,99 @@ body.app-fullscreen #app-container {
         width: 100%;
         max-width: 240px;
     }
+}
+
+/* ========== 天机紊乱 - 错误详情折叠面板 ========== */
+.error-details-panel {
+    margin-top: 0.8rem;
+    border: 1px solid rgba(180, 140, 80, 0.3);
+    border-radius: 6px;
+    background: rgba(30, 20, 10, 0.6);
+    overflow: hidden;
+}
+
+.error-details-summary {
+    cursor: pointer;
+    padding: 0.5rem 0.8rem;
+    font-size: 0.85rem;
+    color: #a08050;
+    user-select: none;
+    transition: background 0.2s, color 0.2s;
+    list-style: none;
+}
+
+.error-details-summary::-webkit-details-marker {
+    display: none;
+}
+
+.error-details-summary::before {
+    content: '▶ ';
+    font-size: 0.7rem;
+    margin-right: 0.3rem;
+    transition: transform 0.2s;
+    display: inline-block;
+}
+
+.error-details-panel[open] .error-details-summary::before {
+    transform: rotate(90deg);
+}
+
+.error-details-summary:hover {
+    background: rgba(180, 140, 80, 0.1);
+    color: #c0a060;
+}
+
+.error-details-content {
+    padding: 0.6rem 0.8rem;
+    border-top: 1px solid rgba(180, 140, 80, 0.2);
+    font-size: 0.8rem;
+    color: #9a8a70;
+}
+
+.error-details-section {
+    margin-bottom: 0.6rem;
+}
+
+.error-details-section:last-child {
+    margin-bottom: 0;
+}
+
+.error-details-section strong {
+    display: block;
+    margin-bottom: 0.3rem;
+    color: #b09060;
+    font-size: 0.82rem;
+}
+
+.error-details-reason,
+.error-details-raw {
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(120, 100, 70, 0.25);
+    border-radius: 4px;
+    padding: 0.5rem 0.6rem;
+    font-family: 'Courier New', monospace;
+    font-size: 0.78rem;
+    color: #c0b090;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 300px;
+    overflow-y: auto;
+    margin: 0;
+    line-height: 1.4;
+}
+
+.error-details-reason {
+    max-height: 100px;
+    color: #d0a060;
+}
+
+.error-details-raw::-webkit-scrollbar,
+.error-details-reason::-webkit-scrollbar {
+    width: 4px;
+}
+
+.error-details-raw::-webkit-scrollbar-thumb,
+.error-details-reason::-webkit-scrollbar-thumb {
+    background: rgba(180, 140, 80, 0.3);
+    border-radius: 2px;
 }

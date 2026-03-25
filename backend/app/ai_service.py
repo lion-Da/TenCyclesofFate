@@ -6,6 +6,10 @@ Provides a unified interface for all AI backend operations.
 Business logic (game_logic.py) should ONLY import this module,
 never openai_client or echo_client directly.
 
+All AI calls are automatically rate-limited through the global
+request queue (RPM control). Callers don't need to worry about
+rate limiting — it's transparent.
+
 Switching or removing a backend (e.g. Echo) only requires changes
 in this file — the rest of the codebase is unaffected.
 """
@@ -42,7 +46,7 @@ else:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Public AI Interface (backend-agnostic)
+# Public AI Interface (backend-agnostic, rate-limited)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def get_ai_response(
@@ -52,13 +56,20 @@ async def get_ai_response(
     force_json: bool = True,
     user_id: str | None = None,
 ) -> str:
-    """Get a complete (non-streaming) AI response."""
+    """
+    Get a complete (non-streaming) AI response.
+    Automatically waits for a rate-limit slot before calling the API.
+    """
+    from .request_queue import queue
     from . import openai_client
-    return await openai_client.get_ai_response(
-        prompt=prompt, history=history,
-        model=model or settings.OPENAI_MODEL,
-        force_json=force_json, user_id=user_id,
-    )
+
+    label = f"non-stream:{(model or settings.OPENAI_MODEL)[:20]}"
+    async with queue.slot(user_id or "system", label=label):
+        return await openai_client.get_ai_response(
+            prompt=prompt, history=history,
+            model=model or settings.OPENAI_MODEL,
+            force_json=force_json, user_id=user_id,
+        )
 
 
 async def get_ai_response_stream(
@@ -67,14 +78,25 @@ async def get_ai_response_stream(
     model: str | None = None,
     user_id: str | None = None,
 ) -> AsyncIterator[str | None]:
-    """Get a streaming AI response. Yields text chunks; None = sentinel (done)."""
+    """
+    Get a streaming AI response. Yields text chunks; None = sentinel (done).
+    
+    Rate limiting: acquires a queue slot BEFORE the first chunk is yielded.
+    The slot is held for the duration of the stream (since the API connection
+    is active). The token-bucket refills concurrently, so this does not
+    block other requests from starting while we're iterating chunks.
+    """
+    from .request_queue import queue
     from . import openai_client
-    async for chunk in openai_client.get_ai_response_stream(
-        prompt=prompt, history=history,
-        model=model or settings.OPENAI_MODEL,
-        user_id=user_id,
-    ):
-        yield chunk
+
+    label = "stream"
+    async with queue.slot(user_id or "system", label=label):
+        async for chunk in openai_client.get_ai_response_stream(
+            prompt=prompt, history=history,
+            model=model or settings.OPENAI_MODEL,
+            user_id=user_id,
+        ):
+            yield chunk
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -135,8 +157,12 @@ def is_image_gen_enabled() -> bool:
 
 
 async def generate_image(scene_prompt: str, user_id: str | None = None) -> str | None:
+    """Generate an image. Rate-limited through the queue."""
+    from .request_queue import queue
     from . import openai_client
-    return await openai_client.generate_image(scene_prompt, user_id=user_id)
+
+    async with queue.slot(user_id or "system", label="image-gen"):
+        return await openai_client.generate_image(scene_prompt, user_id=user_id)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

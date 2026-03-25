@@ -38,6 +38,94 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+# ─────────────────────────────────────────────
+# Robust type helpers (AI output can be anything)
+# ─────────────────────────────────────────────
+
+def _ensure_str_list(value: Any) -> list[str]:
+    """
+    Normalise *any* AI-produced value into a flat ``list[str]``.
+
+    Handles every quirky shape the LLM might return for 特殊标记,
+    已突破阈值, 好感度变动记录 etc.:
+      - None / missing            → []
+      - "结拜"                    → ["结拜"]
+      - ["结拜", "道侣"]          → as-is
+      - ["结拜", ["道侣"]]        → ["结拜", "道侣"]  (flatten)
+      - 123 / True                → ["123"] / ["True"]
+      - {"a": 1}                  → ['{"a": 1}']
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (int, float, bool)):
+        return [str(value)]
+    if isinstance(value, dict):
+        # Dicts are not iterable in a useful way; stringify
+        import json as _json
+        try:
+            return [_json.dumps(value, ensure_ascii=False)]
+        except Exception:
+            return [str(value)]
+    if isinstance(value, (list, tuple)):
+        result: list[str] = []
+        for item in value:
+            result.extend(_ensure_str_list(item))  # recursive flatten
+        return result
+    # Fallback: stringify anything else
+    return [str(value)]
+
+
+def _ensure_int_list(value: Any) -> list[int]:
+    """
+    Normalise *any* AI-produced value into a flat ``list[int]``.
+
+    Used for 已突破阈值 which should be [20, 40, 60, 80] subset.
+    Handles: None, single int, str("20"), list of mixed, nested, etc.
+    Non-numeric items are silently dropped.
+    """
+    if value is None:
+        return []
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, int):
+        return [value]
+    if isinstance(value, float):
+        return [int(value)]
+    if isinstance(value, str):
+        try:
+            return [int(value)]
+        except (ValueError, TypeError):
+            return []
+    if isinstance(value, (list, tuple)):
+        result: list[int] = []
+        for item in value:
+            result.extend(_ensure_int_list(item))
+        return result
+    return []
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    """Coerce any AI-produced value to int. Returns *default* on failure."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            # Try extracting leading digits: "15点" -> 15
+            import re
+            m = re.match(r"^[-+]?\d+", value.strip())
+            return int(m.group()) if m else default
+    return default
+
+
 # ─────────────────────────────────────────────
 # 常量
 # ─────────────────────────────────────────────
@@ -140,8 +228,9 @@ BREAKTHROUGH_EVENTS = {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def get_affinity_stage(score: int) -> dict:
+def get_affinity_stage(score: int | Any) -> dict:
     """根据好感度分数返回当前阶段信息。"""
+    score = _safe_int(score, 0)
     score = max(MIN_AFFINITY, min(MAX_AFFINITY, score))
     for stage in AFFINITY_STAGES:
         if stage["min"] <= score < stage["max"] or (score == MAX_AFFINITY and stage["max"] == MAX_AFFINITY):
@@ -149,12 +238,13 @@ def get_affinity_stage(score: int) -> dict:
     return {"name": "陌生", "key": "stranger"}
 
 
-def get_current_bottleneck(score: int, breakthroughs: list[int]) -> int | None:
+def get_current_bottleneck(score: int, breakthroughs: list | None = None) -> int | None:
     """
     获取当前好感度面临的瓶颈值。
     如果该瓶颈已被突破(在 breakthroughs 列表中)则返回 None。
     """
-    breakthroughs = breakthroughs or []
+    score = _safe_int(score, 0)
+    breakthroughs = _ensure_int_list(breakthroughs)
     for threshold in BOTTLENECK_THRESHOLDS:
         if score >= threshold and threshold not in breakthroughs:
             return threshold
@@ -163,14 +253,14 @@ def get_current_bottleneck(score: int, breakthroughs: list[int]) -> int | None:
 
 def clamp_affinity(
     new_score: int,
-    breakthroughs: list[int] | None = None,
+    breakthroughs: list | None = None,
 ) -> int:
     """
     将好感度值 clamp 到合法范围，并考虑瓶颈约束。
     正方向: 如果遇到未突破的瓶颈，卡在瓶颈值
     负方向: 无瓶颈，直接到 -100
     """
-    breakthroughs = breakthroughs or []
+    breakthroughs = _ensure_int_list(breakthroughs)
     new_score = max(MIN_AFFINITY, min(MAX_AFFINITY, new_score))
 
     # 正向瓶颈检查
@@ -206,8 +296,9 @@ def apply_affinity_change(
             "stage_changed": bool,
         }
     """
-    old_score = npc.get("好感度", 0)
-    breakthroughs = npc.get("已突破阈值", [])
+    old_score = _safe_int(npc.get("好感度", 0), 0)
+    breakthroughs = _ensure_int_list(npc.get("已突破阈值", []))
+    delta = _safe_int(delta, 0)
     raw_new = old_score + delta
     new_score = clamp_affinity(raw_new, breakthroughs)
 
@@ -228,11 +319,11 @@ def apply_affinity_change(
         "old": old_score,
         "new": new_score,
     }
-    if "好感度变动记录" not in npc:
-        npc["好感度变动记录"] = []
-    npc["好感度变动记录"].append(log_entry)
-    # 只保留最近10条
-    npc["好感度变动记录"] = npc["好感度变动记录"][-10:]
+    history = npc.get("好感度变动记录")
+    if not isinstance(history, list):
+        history = []
+    history.append(log_entry)
+    npc["好感度变动记录"] = history[-10:]  # 只保留最近10条
 
     result = {
         "old_score": old_score,
@@ -268,7 +359,8 @@ def process_breakthrough(npc: dict, threshold: int) -> bool:
         logger.warning(f"无效的突破阈值: {threshold}")
         return False
 
-    breakthroughs = npc.get("已突破阈值", [])
+    threshold = _safe_int(threshold, 0)
+    breakthroughs = _ensure_int_list(npc.get("已突破阈值", []))
     if threshold in breakthroughs:
         logger.info(f"阈值 {threshold} 已经被突破过了")
         return False
@@ -479,12 +571,14 @@ def process_social_state_update(current_life: dict, social_update: dict) -> list
         # 处理新 NPC 加入
         if "新NPC" in update and npc_name not in npcs:
             new_npc_data = update["新NPC"]
+            if not isinstance(new_npc_data, dict):
+                new_npc_data = {}
             npc = create_npc_template(
-                name=npc_name,
-                personality=new_npc_data.get("性格", ""),
-                affinity=new_npc_data.get("初始好感度", 0),
+                name=str(npc_name),
+                personality=str(new_npc_data.get("性格", "") or ""),
+                affinity=_safe_int(new_npc_data.get("初始好感度", 0), 0),
             )
-            npc["身份"] = new_npc_data.get("身份", "")
+            npc["身份"] = str(new_npc_data.get("身份", "") or "")
             npc["关系阶段"] = get_affinity_stage(npc["好感度"])["name"]
             npcs[npc_name] = npc
             messages.append(f"结识新人: {npc_name} ({npc.get('身份', '未知身份')})")
@@ -495,8 +589,9 @@ def process_social_state_update(current_life: dict, social_update: dict) -> list
             continue
 
         # 处理突破事件
-        breakthrough = update.get("突破阈值")
-        if breakthrough and isinstance(breakthrough, int):
+        breakthrough_raw = update.get("突破阈值")
+        breakthrough = _safe_int(breakthrough_raw, 0) if breakthrough_raw is not None else 0
+        if breakthrough:
             if process_breakthrough(npc, breakthrough):
                 bt_info = BREAKTHROUGH_EVENTS.get(breakthrough, {})
                 bt_name = bt_info.get("name", f"阈值{breakthrough}突破")
@@ -505,8 +600,8 @@ def process_social_state_update(current_life: dict, social_update: dict) -> list
                 )
 
         # 处理好感度变化
-        delta = update.get("好感度变化", 0)
-        reason = update.get("原因", "")
+        delta = _safe_int(update.get("好感度变化", 0), 0)
+        reason = str(update.get("原因", "") or "")
         if delta != 0:
             result = apply_affinity_change(npc, delta, reason)
 
@@ -524,14 +619,16 @@ def process_social_state_update(current_life: dict, social_update: dict) -> list
                     f"需要更深的羁绊事件方能突破。"
                 )
 
-        # 处理特殊标记
-        special_mark = update.get("特殊标记")
-        if special_mark:
-            marks = npc.get("特殊标记", [])
-            if special_mark not in marks:
-                marks.append(special_mark)
-                npc["特殊标记"] = marks
-                messages.append(f"与{npc_name}建立了特殊关系:【{special_mark}】")
+        # 处理特殊标记 — AI may return str, list, nested list, etc.
+        special_mark_raw = update.get("特殊标记")
+        if special_mark_raw:
+            new_marks = _ensure_str_list(special_mark_raw)
+            existing = _ensure_str_list(npc.get("特殊标记", []))
+            for m in new_marks:
+                if m and m not in existing:
+                    existing.append(m)
+                    messages.append(f"与{npc_name}建立了特殊关系:【{m}】")
+            npc["特殊标记"] = existing
 
     current_life["人物关系"] = npcs
     return messages
@@ -549,16 +646,16 @@ def get_social_summary(current_life: dict) -> list[dict]:
     for name, npc in npcs.items():
         if not isinstance(npc, dict):
             continue
-        score = npc.get("好感度", 0)
+        score = _safe_int(npc.get("好感度", 0), 0)
         stage = get_affinity_stage(score)
         summary.append({
-            "name": name,
+            "name": str(name),
             "score": score,
             "stage": stage["name"],
             "stage_key": stage["key"],
-            "personality": npc.get("性格", ""),
-            "identity": npc.get("身份", ""),
-            "special_marks": npc.get("特殊标记", []),
+            "personality": str(npc.get("性格", "") or ""),
+            "identity": str(npc.get("身份", "") or ""),
+            "special_marks": _ensure_str_list(npc.get("特殊标记", [])),
             "bottleneck": get_current_bottleneck(score, npc.get("已突破阈值", [])),
         })
 
@@ -579,10 +676,10 @@ def inject_social_context_for_ai(current_life: dict) -> str:
     for name, npc in npcs.items():
         if not isinstance(npc, dict):
             continue
-        score = npc.get("好感度", 0)
+        score = _safe_int(npc.get("好感度", 0), 0)
         stage = get_affinity_stage(score)
         bottleneck = get_current_bottleneck(score, npc.get("已突破阈值", []))
-        marks = npc.get("特殊标记", [])
+        marks = _ensure_str_list(npc.get("特殊标记", []))
         mark_str = f" [{', '.join(marks)}]" if marks else ""
 
         line = f"  - {name}: 好感度={score} ({stage['name']}){mark_str}"
