@@ -869,18 +869,19 @@ def _effective_unchecked_rounds_for_cheat_check(raw_value: object) -> int:
 # --- 静态字段列表：这些字段在角色创建后不再变化，合并进"人物背景" ---
 STATIC_FIELDS = ["姓名", "性别", "外貌", "服饰", "出身", "初始天赋", "初始事件", "同行模式"]
 
-# --- 核心永久字段白名单：这些字段属于角色的固有状态，不会被自动清理 ---
-# 注意：此白名单用于双重保护。即使一个字段意外被注册到追踪系统，
-# 只要它在此名单中就不会被清理。
+# --- 核心永久字段白名单（仅作为最后一道安全网，不再是主要判定依据） ---
+# 主要判定逻辑：字段名以 "~" 开头 → 临时字段，否则 → 持久字段
+# 此白名单作为额外保护：即使一个白名单字段被误标记为 ~，也不会被清理
 PERMANENT_FIELDS = {
     # 核心角色状态
     "人物背景", "生命值", "最大生命值", "属性", "物品", "状态效果",
     "位置", "故事事件", "人物关系", "功法", "灵石",
     # 旧版兼容（合并前的静态字段）
     "姓名", "性别", "外貌", "服饰", "出身", "初始天赋", "初始事件", "同行模式",
-    # 可能由AI动态生成的重要持久字段
-    "修为", "修为境界", "门派", "势力", "声望", "境界",
 }
+
+# 临时事件字段的前缀标记 —— 只有以此前缀开头的字段才会被追踪和自动清理
+TEMP_FIELD_PREFIX = "~"
 
 # 临时事件字段的最大存活回合数 —— 超过此回合数无更新则自动清理
 EVENT_FIELD_MAX_AGE = 8
@@ -1007,12 +1008,9 @@ def _track_and_cleanup_event_fields(session: dict) -> list[str]:
     """
     追踪并清理 current_life 中的临时事件字段。
     
-    【安全机制 - 仅追踪显式注册的字段】
-    - 不再主动扫描 current_life 的所有 key 来发现"临时字段"。
-    - 只有通过 _mark_event_fields_updated() 显式注册到 _event_field_ages
-      中的字段才会被追踪和老化。
-    - 即使一个字段被意外注册，只要它在 PERMANENT_FIELDS 白名单中，
-      也绝对不会被清理（双重保护）。
+    【判定规则】
+    只有字段名以 TEMP_FIELD_PREFIX（"~"）开头的字段才被视为临时字段，
+    会被追踪老化和自动清理。所有其他字段默认为持久字段，永不自动清理。
     
     老化规则：
     - 本回合被 AI 更新（touched） -> 重置计数为 0
@@ -1023,20 +1021,29 @@ def _track_and_cleanup_event_fields(session: dict) -> list[str]:
         被清理掉的字段名列表（用于日志/通知）
     """
     current_life = session.get("current_life")
-    if not current_life or not isinstance(current_life, dict):
+    if current_life is None or not isinstance(current_life, dict):
         return []
     
     ages: dict[str, int] = session.get("_event_field_ages", {})
     touched: set = session.pop("_event_fields_touched_this_round", set())
     cleaned = []
     
-    # 只处理已注册追踪的字段，不主动发现新字段
+    # 扫描 current_life 中以 ~ 开头的临时字段，自动注册追踪
+    for key in list(current_life.keys()):
+        if key.startswith(TEMP_FIELD_PREFIX) and key not in ages:
+            ages[key] = 0
+    
+    # 更新老化计数
     for field in list(ages.keys()):
-        # 双重保护：永久字段即使被误注册也不清理
+        # 安全网：永久字段白名单中的字段绝不清理
         if field in PERMANENT_FIELDS:
             del ages[field]
             continue
-        # 字段已被其他逻辑删除，清理追踪记录
+        # 非 ~ 前缀的字段不应在追踪中（兼容旧数据），移除
+        if not field.startswith(TEMP_FIELD_PREFIX):
+            del ages[field]
+            continue
+        # 字段已被其他逻辑删除（如AI设为null），清理追踪记录
         if field not in current_life:
             del ages[field]
             continue
@@ -1051,7 +1058,9 @@ def _track_and_cleanup_event_fields(session: dict) -> list[str]:
         if ages[field] >= EVENT_FIELD_MAX_AGE:
             if field in current_life:
                 del current_life[field]
-                cleaned.append(field)
+                # 显示名去掉 ~ 前缀
+                display_name = field.lstrip(TEMP_FIELD_PREFIX)
+                cleaned.append(display_name)
                 logger.info(f"临时事件字段自动清理: '{field}' (超过{EVENT_FIELD_MAX_AGE}回合未更新)")
             del ages[field]
     
@@ -1061,26 +1070,23 @@ def _track_and_cleanup_event_fields(session: dict) -> list[str]:
 
 def _mark_event_fields_updated(session: dict, updated_keys: list[str]) -> None:
     """
-    标记本回合被AI更新的临时事件字段。
+    标记本回合被AI更新的临时事件字段（以 ~ 开头的字段）。
     在 _apply_state_update 后、_track_and_cleanup_event_fields 前调用。
+    
+    只有以 TEMP_FIELD_PREFIX（"~"）开头的字段才会被标记。
     
     Args:
         updated_keys: 本回合 state_update 中涉及的所有 key
-                      (如 "current_life.外门大比进程" → "外门大比进程")
+                      (如 "current_life.~外门大比进程" → "~外门大比进程")
     """
     touched: set = session.get("_event_fields_touched_this_round", set())
-    ages: dict[str, int] = session.get("_event_field_ages", {})
     for key in updated_keys:
         # 提取 current_life 下的直接字段名
         parts = key.split(".")
         if len(parts) >= 2 and parts[0] == "current_life":
             field_name = parts[1].rstrip("+-")  # 去掉 +/- 后缀
-            if field_name not in PERMANENT_FIELDS:
+            if field_name.startswith(TEMP_FIELD_PREFIX):
                 touched.add(field_name)
-                # 显式注册到追踪系统（只有这里才会新增追踪条目）
-                if field_name not in ages:
-                    ages[field_name] = 0
-    session["_event_field_ages"] = ages
     session["_event_fields_touched_this_round"] = touched
 
 
@@ -1145,7 +1151,52 @@ def _remove_item_from_list(current_list: list, removal) -> None:
                 return
 
 
+# --- 英文key→中文key映射（AI偶尔返回英文key时自动修正） ---
+_EN_TO_CN_KEY_MAP = {
+    "story_events": "故事事件", "current_cultivation": "当前修炼",
+    "cultivation": "功法", "hp": "生命值", "max_hp": "最大生命值",
+    "items": "物品", "inventory": "物品", "location": "位置",
+    "position": "位置", "status": "状态效果", "status_effects": "状态效果",
+    "attributes": "属性", "stats": "属性", "spirit_stones": "灵石",
+    "background": "人物背景", "relationships": "人物关系",
+    "combat_power": "战斗力", "realm": "境界",
+    "cultivation_progress": "修炼进度", "sect": "门派",
+    "reputation": "声望", "faction": "势力",
+    "name": "姓名", "gender": "性别", "appearance": "外貌",
+}
+
+
+def _normalize_english_keys(update: dict) -> dict:
+    """
+    将 state_update 中的英文 key 自动替换为中文 key。
+    处理形如 "current_life.story_events+" → "current_life.故事事件+" 的映射。
+    """
+    normalized = {}
+    for key, value in update.items():
+        parts = key.split(".")
+        changed = False
+        for i, part in enumerate(parts):
+            # 去掉 +/- 后缀再查映射
+            suffix = ""
+            clean = part
+            if clean.endswith("+") or clean.endswith("-"):
+                suffix = clean[-1]
+                clean = clean[:-1]
+            cn = _EN_TO_CN_KEY_MAP.get(clean.lower())
+            if cn:
+                parts[i] = cn + suffix
+                changed = True
+        new_key = ".".join(parts)
+        if changed:
+            logger.debug(f"英文key自动修正: '{key}' → '{new_key}'")
+        normalized[new_key] = value
+    return normalized
+
+
 def _apply_state_update(state: dict, update: dict) -> dict:
+    # --- 英文key自动修正：AI偶尔返回英文key，统一替换为中文 ---
+    update = _normalize_english_keys(update)
+    
     # --- 社交系统：拦截并处理人物关系更新 ---
     social_updates = {}
     regular_updates = {}

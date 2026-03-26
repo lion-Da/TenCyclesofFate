@@ -836,15 +836,22 @@ function renderCharacterStatus() {
 
     // --- 定义渲染顺序和特殊处理 ---
     const SKIP_KEYS = ['人物关系', '功法'];
-    const PERMANENT_KEYS = new Set([
-        '人物背景', '生命值', '最大生命值', '属性', '物品', '状态效果',
-        '位置', '故事事件', '人物关系', '功法', '灵石',
-        // 旧版静态字段兼容
-        '姓名', '性别', '外貌', '服饰', '出身', '初始天赋', '初始事件', '同行模式',
-        // AI可能动态生成的持久字段
-        '修为', '修为境界', '门派', '势力', '声望', '境界',
-    ]);
+    // 临时事件字段前缀：以 "~" 开头的字段视为临时事件，其余全部为持久字段
+    const TEMP_FIELD_PREFIX = '~';
     const PRIORITY_KEYS = ['人物背景', '生命值', '灵石', '属性', '物品', '状态效果', '位置', '故事事件'];
+
+    // --- 英文key→中文映射兜底（AI偶尔返回英文key时自动修正显示） ---
+    const EN_TO_CN_KEY_MAP = {
+        'story_events': '故事事件', 'current_cultivation': '当前修炼',
+        'cultivation': '功法', 'hp': '生命值', 'max_hp': '最大生命值',
+        'items': '物品', 'inventory': '物品', 'location': '位置',
+        'position': '位置', 'status': '状态效果', 'status_effects': '状态效果',
+        'attributes': '属性', 'stats': '属性', 'spirit_stones': '灵石',
+        'background': '人物背景', 'relationships': '人物关系',
+        'combat_power': '战斗力', 'realm': '境界', 'cultivation_progress': '修炼进度',
+        'sect': '门派', 'reputation': '声望', 'faction': '势力',
+        'name': '姓名', 'gender': '性别', 'appearance': '外貌',
+    };
 
     // 收集所有需要渲染的 key，优先级排列
     const allKeys = Object.keys(current_life);
@@ -860,8 +867,14 @@ function renderCharacterStatus() {
         if (SKIP_KEYS.includes(key)) return;
         const value = current_life[key];
 
+        // 英文key自动翻译为中文显示名
+        const cnKey = EN_TO_CN_KEY_MAP[key.toLowerCase()] || EN_TO_CN_KEY_MAP[key] || null;
+        const displayKey = cnKey || key;
+        // 用于特殊渲染匹配的规范key（优先中文）
+        const matchKey = cnKey || key;
+
         // ── 人物背景: 特殊渲染为固定展开的概要区 ──
-        if (key === '人物背景') {
+        if (matchKey === '人物背景') {
             const bgSection = document.createElement('div');
             bgSection.classList.add('character-background-section');
 
@@ -898,7 +911,7 @@ function renderCharacterStatus() {
         }
 
         // ── 故事事件: 特殊渲染 ──
-        if (key === '故事事件' && Array.isArray(value)) {
+        if (matchKey === '故事事件' && Array.isArray(value)) {
             const details = document.createElement('details');
             const summary = document.createElement('summary');
             summary.textContent = `故事事件 (${value.length})`;
@@ -929,7 +942,7 @@ function renderCharacterStatus() {
         }
 
         // ── 物品: 增强渲染，显示数量 ──
-        if (key === '物品' && Array.isArray(value)) {
+        if (matchKey === '物品' && Array.isArray(value)) {
             const details = document.createElement('details');
             const summary = document.createElement('summary');
             summary.textContent = `物品 (${value.length})`;
@@ -968,12 +981,14 @@ function renderCharacterStatus() {
         }
 
         // ── 默认渲染逻辑 ──
-        // 区分永久字段和临时事件字段
-        const isEventField = !PERMANENT_KEYS.has(key);
+        // 以 ~ 开头的字段为临时事件字段
+        const isEventField = key.startsWith(TEMP_FIELD_PREFIX);
+        // 显示名：去掉~前缀 + 英文翻译
+        const baseName = isEventField ? key.slice(TEMP_FIELD_PREFIX.length) : displayKey;
         const details = document.createElement('details');
         if (isEventField) details.classList.add('event-field');
         const summary = document.createElement('summary');
-        summary.textContent = isEventField ? `▸ ${key}` : key;
+        summary.textContent = isEventField ? `▸ ${baseName}` : baseName;
         details.appendChild(summary);
 
         const content = document.createElement('div');
