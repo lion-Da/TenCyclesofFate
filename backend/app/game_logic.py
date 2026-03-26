@@ -870,11 +870,16 @@ def _effective_unchecked_rounds_for_cheat_check(raw_value: object) -> int:
 STATIC_FIELDS = ["姓名", "性别", "外貌", "服饰", "出身", "初始天赋", "初始事件", "同行模式"]
 
 # --- 核心永久字段白名单：这些字段属于角色的固有状态，不会被自动清理 ---
+# 注意：此白名单用于双重保护。即使一个字段意外被注册到追踪系统，
+# 只要它在此名单中就不会被清理。
 PERMANENT_FIELDS = {
+    # 核心角色状态
     "人物背景", "生命值", "最大生命值", "属性", "物品", "状态效果",
     "位置", "故事事件", "人物关系", "功法", "灵石",
-    # 以下为旧版兼容（合并前的静态字段）
+    # 旧版兼容（合并前的静态字段）
     "姓名", "性别", "外貌", "服饰", "出身", "初始天赋", "初始事件", "同行模式",
+    # 可能由AI动态生成的重要持久字段
+    "修为", "修为境界", "门派", "势力", "声望", "境界",
 }
 
 # 临时事件字段的最大存活回合数 —— 超过此回合数无更新则自动清理
@@ -1000,16 +1005,19 @@ def _prune_story_events(current_life: dict) -> None:
 
 def _track_and_cleanup_event_fields(session: dict) -> list[str]:
     """
-    追踪 current_life 中的临时事件字段（非永久字段白名单内的），
-    在字段长期无更新后自动清理。
+    追踪并清理 current_life 中的临时事件字段。
     
-    机制：
-    - session["_event_field_ages"] 记录每个临时字段的"未更新回合数"
-    - session["_event_fields_touched_this_round"] 记录本回合被更新的字段
-    - 每回合调用时：
-      - 本回合被 AI 更新过的字段 → 重置计数为 0
-      - 未被更新的字段 → 计数 +1
-      - 计数超过 EVENT_FIELD_MAX_AGE → 自动清除
+    【安全机制 - 仅追踪显式注册的字段】
+    - 不再主动扫描 current_life 的所有 key 来发现"临时字段"。
+    - 只有通过 _mark_event_fields_updated() 显式注册到 _event_field_ages
+      中的字段才会被追踪和老化。
+    - 即使一个字段被意外注册，只要它在 PERMANENT_FIELDS 白名单中，
+      也绝对不会被清理（双重保护）。
+    
+    老化规则：
+    - 本回合被 AI 更新（touched） -> 重置计数为 0
+    - 未被更新 -> 计数 +1
+    - 计数 >= EVENT_FIELD_MAX_AGE -> 自动清除
     
     Returns:
         被清理掉的字段名列表（用于日志/通知）
@@ -1022,27 +1030,21 @@ def _track_and_cleanup_event_fields(session: dict) -> list[str]:
     touched: set = session.pop("_event_fields_touched_this_round", set())
     cleaned = []
     
-    # 识别当前所有非永久字段
-    temp_fields = set()
-    for key in list(current_life.keys()):
-        if key not in PERMANENT_FIELDS:
-            temp_fields.add(key)
-    
-    # 为新出现的临时字段初始化追踪
-    for field in temp_fields:
-        if field not in ages:
-            ages[field] = 0
-    
-    # 更新计数：被更新的重置为0，未更新的+1
+    # 只处理已注册追踪的字段，不主动发现新字段
     for field in list(ages.keys()):
-        if field not in temp_fields:
-            # 字段已被删除（null或其他方式），清理记录
+        # 双重保护：永久字段即使被误注册也不清理
+        if field in PERMANENT_FIELDS:
             del ages[field]
             continue
+        # 字段已被其他逻辑删除，清理追踪记录
+        if field not in current_life:
+            del ages[field]
+            continue
+        # 本回合有更新 -> 重置
         if field in touched:
-            ages[field] = 0  # 本回合有更新，重置
+            ages[field] = 0
         else:
-            ages[field] = ages.get(field, 0) + 1  # 老化
+            ages[field] = ages.get(field, 0) + 1
     
     # 清理超龄字段
     for field in list(ages.keys()):
@@ -1067,6 +1069,7 @@ def _mark_event_fields_updated(session: dict, updated_keys: list[str]) -> None:
                       (如 "current_life.外门大比进程" → "外门大比进程")
     """
     touched: set = session.get("_event_fields_touched_this_round", set())
+    ages: dict[str, int] = session.get("_event_field_ages", {})
     for key in updated_keys:
         # 提取 current_life 下的直接字段名
         parts = key.split(".")
@@ -1074,6 +1077,10 @@ def _mark_event_fields_updated(session: dict, updated_keys: list[str]) -> None:
             field_name = parts[1].rstrip("+-")  # 去掉 +/- 后缀
             if field_name not in PERMANENT_FIELDS:
                 touched.add(field_name)
+                # 显式注册到追踪系统（只有这里才会新增追踪条目）
+                if field_name not in ages:
+                    ages[field_name] = 0
+    session["_event_field_ages"] = ages
     session["_event_fields_touched_this_round"] = touched
 
 
