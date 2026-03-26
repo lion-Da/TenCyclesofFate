@@ -1518,6 +1518,98 @@ _CONTINUATION_PROMPT = (
 )
 
 
+def _ensure_narrative_not_empty(parsed: dict, raw_text: str) -> dict:
+    """
+    校验解析结果中的 narrative 不为空。
+    如果为空，尝试从原始文本中提取中文叙事内容。
+    """
+    if not isinstance(parsed, dict):
+        return parsed
+    
+    narrative = parsed.get("narrative", "")
+    if narrative and len(str(narrative).strip()) > 5:
+        return parsed  # narrative 正常，直接返回
+    
+    # narrative 为空——尝试从原始文本抢救
+    salvaged = _extract_narrative_from_broken_json(raw_text)
+    if salvaged and len(salvaged) > 20:
+        parsed["narrative"] = salvaged
+        logger.info(f"空narrative修复: 从原始文本抢救 {len(salvaged)} 字符")
+        return parsed
+    
+    # 尝试提取原文中的中文内容作为 narrative
+    cn_lines = []
+    for line in raw_text.split('\n'):
+        line = line.strip()
+        if line and any('\u4e00' <= c <= '\u9fff' for c in line):
+            # 跳过明显的元数据行
+            if not any(skip in line for skip in ['struct', 'TOOL_CALL', 'tool:', 'args:']):
+                cn_lines.append(line)
+    
+    if cn_lines:
+        extracted = '\n'.join(cn_lines)
+        if len(extracted) > 20:
+            parsed["narrative"] = extracted
+            logger.info(f"空narrative修复: 从原文提取中文内容 {len(extracted)} 字符")
+    
+    return parsed
+
+
+def _handle_tool_call_format(text: str) -> str:
+    """
+    处理某些模型（如MiniMax）返回的 [TOOL_CALL] 格式。
+    
+    这些模型不直接输出 JSON，而是用如下格式：
+    [TOOL_CALL]
+    struct Tool {
+        tool: "gen_response_json",
+        args: {
+            narrative="叙事内容...",
+            state_update={...}
+        }
+    }
+    
+    本函数检测此格式并尝试提取 narrative 内容，构造标准 JSON 返回。
+    如果不是此格式，原样返回。
+    """
+    if "[TOOL_CALL]" not in text and "struct Tool" not in text:
+        return text
+    
+    logger.info(f"检测到 [TOOL_CALL] 格式，尝试提取 narrative...")
+    
+    # 策略1: 尝试找到 narrative= 后面的字符串值
+    narrative = ""
+    # 匹配 narrative="..." 或 narrative: "..."
+    m = _re.search(r'narrative\s*[=:]\s*"((?:[^"\\]|\\.)*)(?:"|\Z)', text, _re.DOTALL)
+    if m:
+        narrative = m.group(1)
+        # 处理转义字符
+        narrative = narrative.replace('\\"', '"').replace('\\n', '\n')
+    
+    if not narrative:
+        # 策略2: 在 [TOOL_CALL] 之前可能有中文叙事文本
+        tool_idx = text.find("[TOOL_CALL]")
+        if tool_idx > 0:
+            prefix = text[:tool_idx].strip()
+            # 去掉英文思考过程，保留中文内容
+            cn_lines = [
+                line for line in prefix.split('\n')
+                if line.strip() and any('\u4e00' <= c <= '\u9fff' for c in line)
+            ]
+            if cn_lines:
+                narrative = '\n'.join(cn_lines)
+    
+    if narrative and len(narrative) > 20:
+        logger.info(f"从 [TOOL_CALL] 格式成功提取 {len(narrative)} 字符 narrative")
+        # 构造标准 JSON（只保留 narrative，state_update 太复杂不尝试提取）
+        safe_narrative = json.dumps(narrative, ensure_ascii=False)
+        return f'{{"narrative": {safe_narrative}, "state_update": {{}}}}'
+    
+    # 无法提取 narrative，返回原文让后续流程处理
+    logger.warning(f"[TOOL_CALL] 格式中未找到有效 narrative，保留原文")
+    return text
+
+
 async def _parse_with_continuation(
     raw_response: str,
     player_id: str,
@@ -1536,7 +1628,10 @@ async def _parse_with_continuation(
     """
     combined = raw_response
 
-    # ★ Pre-fix: escape unescaped literary quotes in the raw response
+    # ★ Pre-fix 0: 处理 [TOOL_CALL] 格式（某些模型如MiniMax使用此格式代替纯JSON）
+    combined = _handle_tool_call_format(combined)
+
+    # ★ Pre-fix 1: escape unescaped literary quotes in the raw response
     combined = _fix_unescaped_quotes_in_json(combined)
 
     # ── Step 0: detect completely non-JSON response (model ignored system prompt) ──
@@ -1556,7 +1651,8 @@ async def _parse_with_continuation(
     json_str = _extract_json_from_response(combined)
     if json_str:
         try:
-            return _robust_json_loads(json_str)
+            result = _robust_json_loads(json_str)
+            return _ensure_narrative_not_empty(result, combined)
         except (json.JSONDecodeError, Exception):
             pass  # Fall through to truncation check
 
@@ -1604,6 +1700,8 @@ async def _parse_with_continuation(
                 if json_str:
                     try:
                         result = _robust_json_loads(json_str)
+                        # 校验 narrative 非空
+                        result = _ensure_narrative_not_empty(result, combined)
                         logger.info(
                             f"Continuation success on attempt {attempt + 1}! "
                             f"Total length: {len(combined)} chars"
@@ -1625,6 +1723,7 @@ async def _parse_with_continuation(
     if repaired:
         try:
             result = _robust_json_loads(repaired)
+            result = _ensure_narrative_not_empty(result, combined)
             logger.info(f"JSON repair successful! Parsed repaired response.")
             return result
         except (json.JSONDecodeError, Exception) as e:
@@ -1819,8 +1918,8 @@ async def _get_ai_response_streaming(
                 sent_length = len(narrative_buffer)
 
     # Stream finished — send end signal
-    if narrative_started:
-        await websocket_manager.send_stream_end(player_id, stream_id)
+    # 无论是否检测到 narrative 都发送结束信号，防止前端永远等待
+    await websocket_manager.send_stream_end(player_id, stream_id)
 
     # Log collected response length for debugging
     logger.info(f"Stream collection done for {player_id}: {len(full_response)} chars")
