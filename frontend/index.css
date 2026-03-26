@@ -1528,3 +1528,39 @@ body.app-fullscreen #app-container {
     background: rgba(180, 140, 80, 0.3);
     border-radius: 2px;
 }
+
+/* ========== 天道演化中 - 叙事窗口处理中提示 ========== */
+.narrative-processing-hint {
+    text-align: center;
+    padding: 2rem 1rem;
+    color: rgba(160, 140, 100, 0.5);
+    font-size: 0.95rem;
+    letter-spacing: 0.3em;
+    animation: processing-breathe 2.5s ease-in-out infinite;
+    user-select: none;
+}
+
+@keyframes processing-breathe {
+    0%, 100% { opacity: 0.3; }
+    50% { opacity: 0.7; }
+}
+
+.narrative-processing-hint .processing-dot-1,
+.narrative-processing-hint .processing-dot-2,
+.narrative-processing-hint .processing-dot-3 {
+    display: inline-block;
+    animation: processing-dot-bounce 1.4s ease-in-out infinite;
+}
+
+.narrative-processing-hint .processing-dot-2 {
+    animation-delay: 0.2s;
+}
+
+.narrative-processing-hint .processing-dot-3 {
+    animation-delay: 0.4s;
+}
+
+@keyframes processing-dot-bounce {
+    0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
+    40% { opacity: 1; transform: translateY(-3px); }
+}

@@ -232,6 +232,10 @@ function handleStreamChunk(message) {
         // 清理上一个流的残留
         _stopTypewriter();
         
+        // 移除"天道演化中"提示
+        const hint = DOMElements.narrativeWindow.querySelector('.narrative-processing-hint');
+        if (hint) hint.remove();
+        
         streamState.activeStreamId = stream_id;
         streamState.streamBuffer = "";
         streamState.typewriterQueue = "";
@@ -712,6 +716,14 @@ function render() {
     DOMElements.narrativeWindow.appendChild(historyContainer);
     if (activeStreamEl && streamState.activeStreamId) {
         DOMElements.narrativeWindow.appendChild(activeStreamEl);
+    }
+    
+    // --- 处理中提示：当正在等待AI响应且无活跃流式输出时，显示"天道演化中" ---
+    if (appState.gameState.is_processing && !streamState.activeStreamId) {
+        const processingHint = document.createElement('div');
+        processingHint.className = 'narrative-processing-hint';
+        processingHint.innerHTML = '<span class="processing-dot-1">·</span><span class="processing-dot-2">·</span><span class="processing-dot-3">·</span> 天道演化中 <span class="processing-dot-1">·</span><span class="processing-dot-2">·</span><span class="processing-dot-3">·</span>';
+        DOMElements.narrativeWindow.appendChild(processingHint);
     }
     
     // 恢复排队指示器（如果仍在排队中）
