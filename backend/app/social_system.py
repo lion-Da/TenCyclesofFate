@@ -223,9 +223,90 @@ BREAKTHROUGH_EVENTS = {
 }
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 核心函数
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ─────────────────────────────────────────────
+# 叙事情感强度分析 — 基于关键词检测好感度事件的重大程度
+# ─────────────────────────────────────────────
+
+# 情感强度等级：每级定义关键词列表、最低delta保底、可突破的最高瓶颈
+NARRATIVE_INTENSITY_TIERS = [
+    {
+        # Tier 4: 天道级 — 道侣/结义/天劫共渡/神魂融合
+        "tier": 4,
+        "keywords": [
+            "道侣", "结为道侣", "天道见证", "天作之合", "神魂融合", "双修", "心意相通",
+            "结义", "结拜", "金兰", "义结金兰",
+            "共渡天劫", "天劫", "雷劫", "心劫",
+            "合道", "道心共鸣", "同生共死",
+        ],
+        "min_delta": 25,   # 此类事件至少 +25
+        "max_breakthrough": 80,  # 可直接突破到 80
+    },
+    {
+        # Tier 3: 生死级 — 舍命相救/绝境共存
+        "tier": 3,
+        "keywords": [
+            "生死与共", "生死相依", "以命相护", "以命相搏", "舍命", "替死", "挡下致命",
+            "不离不弃", "绝境", "九死一生", "死里逃生", "拼死相救", "以身挡",
+            "互托后事", "同归于尽", "生死之交", "血盟", "斩杀仇敌",
+            "承受反噬", "因果反噬", "魂飞魄散", "灵魂献祭",
+        ],
+        "min_delta": 18,
+        "max_breakthrough": 60,
+    },
+    {
+        # Tier 2: 深交级 — 互救/共探险境/患难与共
+        "tier": 2,
+        "keywords": [
+            "互救", "救命之恩", "出手相助", "搭救", "救下", "恩情",
+            "患难", "共同击退", "并肩作战", "合力", "联手",
+            "秘境", "共探", "共闯", "共同冒险",
+            "传授", "赠送功法", "倾囊相授", "传承", "赐予",
+            "信任", "托付", "坦诚相告", "互明心迹",
+        ],
+        "min_delta": 10,
+        "max_breakthrough": 40,
+    },
+    {
+        # Tier 1: 初识级 — 小恩小惠/日常互动（不触发瓶颈突破）
+        "tier": 1,
+        "keywords": [
+            "寒暄", "交谈", "指点", "切磋", "论道", "赠送", "赠礼",
+            "一同", "同行", "相伴", "照顾", "关心",
+        ],
+        "min_delta": 3,
+        "max_breakthrough": 0,  # tier 1 不自动突破任何瓶颈
+    },
+]
+
+
+def _analyze_narrative_intensity(reason: str) -> dict:
+    """
+    分析好感度变化的"原因"文本，返回情感强度信息。
+
+    Returns:
+        {
+            "tier": int (0-4, 0表示无明显关键词),
+            "min_delta": int (该强度下的最低好感度变化),
+            "max_breakthrough": int (该强度可突破的最高瓶颈),
+            "matched_keywords": list[str]
+        }
+    """
+    if not reason:
+        return {"tier": 0, "min_delta": 0, "max_breakthrough": 0, "matched_keywords": []}
+
+    best_tier = {"tier": 0, "min_delta": 0, "max_breakthrough": 0, "matched_keywords": []}
+
+    for tier_def in NARRATIVE_INTENSITY_TIERS:
+        matched = [kw for kw in tier_def["keywords"] if kw in reason]
+        if matched and tier_def["tier"] > best_tier["tier"]:
+            best_tier = {
+                "tier": tier_def["tier"],
+                "min_delta": tier_def["min_delta"],
+                "max_breakthrough": tier_def["max_breakthrough"],
+                "matched_keywords": matched,
+            }
+
+    return best_tier
 
 
 def get_affinity_stage(score: int | Any) -> dict:
@@ -608,8 +689,72 @@ def process_social_state_update(current_life: dict, social_update: dict) -> list
         # 处理好感度变化
         delta = _safe_int(update.get("好感度变化", 0), 0)
         reason = str(update.get("原因", "") or "")
+
+        # --- 叙事强度修正 ---
+        # 分析"原因"中的情感关键词，当AI给的delta与叙事强度不匹配时自动修正
+        if delta > 0 and reason:
+            intensity = _analyze_narrative_intensity(reason)
+            if intensity["tier"] > 0:
+                # 如果AI给的delta低于该强度的最低值，自动提升
+                if delta < intensity["min_delta"]:
+                    old_delta = delta
+                    delta = intensity["min_delta"]
+                    logger.info(
+                        f"叙事强度修正: NPC={npc_name}, "
+                        f"tier={intensity['tier']}, "
+                        f"delta {old_delta} → {delta}, "
+                        f"keywords={intensity['matched_keywords']}, "
+                        f"reason='{reason}'"
+                    )
+
+                # 该强度可以突破的瓶颈——自动执行突破
+                max_bt = intensity["max_breakthrough"]
+                breakthroughs = _ensure_int_list(npc.get("已突破阈值", []))
+                current_score = _safe_int(npc.get("好感度", 0), 0)
+                for threshold in BOTTLENECK_THRESHOLDS:
+                    if threshold > max_bt:
+                        break
+                    if threshold not in breakthroughs and current_score + delta >= threshold:
+                        if process_breakthrough(npc, threshold):
+                            bt_info = BREAKTHROUGH_EVENTS.get(threshold, {})
+                            bt_name = bt_info.get("name", f"阈值{threshold}突破")
+                            messages.append(
+                                f"【缘分突破 · {bt_name}】"
+                                f"与{npc_name}的羁绊突破了{threshold}点瓶颈！"
+                            )
+                            logger.info(
+                                f"叙事强度自动突破: NPC={npc_name}, "
+                                f"threshold={threshold}, tier={intensity['tier']}, "
+                                f"keywords={intensity['matched_keywords']}"
+                            )
+
         if delta != 0:
             result = apply_affinity_change(npc, delta, reason)
+
+            # --- 回退自动突破（无关键词但delta足够大） ---
+            # 当叙事强度系统没有匹配到关键词，但AI给了很大的delta
+            # （说明AI意图突破），且delta >= 15时才触发
+            if result["bottleneck_hit"] and delta >= 15:
+                hit_bn = result["bottleneck_hit"]
+                old_score = result["old_score"]
+                intended_score = old_score + delta
+                if intended_score > hit_bn:
+                    logger.info(
+                        f"回退自动突破: NPC={npc_name}, "
+                        f"intended={intended_score} > bottleneck={hit_bn}, "
+                        f"delta={delta}, reason='{reason}'"
+                    )
+                    if process_breakthrough(npc, hit_bn):
+                        bt_info = BREAKTHROUGH_EVENTS.get(hit_bn, {})
+                        bt_name = bt_info.get("name", f"阈值{hit_bn}突破")
+                        messages.append(
+                            f"【缘分突破 · {bt_name}】与{npc_name}的羁绊突破了{hit_bn}点瓶颈！"
+                        )
+                        # 突破后补回被截断的好感度
+                        result = apply_affinity_change(npc, 0, "")
+                        remaining = intended_score - hit_bn
+                        if remaining > 0:
+                            result = apply_affinity_change(npc, remaining, reason + "(突破后)")
 
             # 更新关系阶段
             npc["关系阶段"] = result["stage"]
