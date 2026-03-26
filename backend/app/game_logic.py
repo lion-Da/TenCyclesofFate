@@ -1202,9 +1202,40 @@ def _apply_state_update(state: dict, update: dict) -> dict:
     regular_updates = {}
     for key, value in update.items():
         if key.startswith("current_life.人物关系.") and isinstance(value, dict):
-            # 提取 NPC 名字: "current_life.人物关系.云霄真人" → "云霄真人"
+            # 格式: "current_life.人物关系.云霄真人": {...}
             npc_name = key.split(".", 2)[2] if key.count(".") >= 2 else key
             social_updates[npc_name] = value
+        elif key == "current_life.人物关系" and isinstance(value, dict):
+            # 格式: "current_life.人物关系": {"柳如烟": {...}, "新NPC": {...}}
+            # AI 直接发送了整个人物关系字典 → 需要合并而非覆盖旧数据
+            for npc_name, npc_data in value.items():
+                if isinstance(npc_data, dict):
+                    # 检查是完整NPC对象还是更新指令
+                    is_full_npc = "好感度" in npc_data and "关系阶段" in npc_data
+                    if is_full_npc:
+                        # 完整NPC对象：直接merge到现有关系中（保留旧数据）
+                        cl = state.setdefault("current_life", {})
+                        if "人物关系" not in cl or not isinstance(cl.get("人物关系"), dict):
+                            cl["人物关系"] = {}
+                        existing_npcs = cl["人物关系"]
+                        if npc_name in existing_npcs and isinstance(existing_npcs[npc_name], dict):
+                            # 合并：保留旧NPC的已突破阈值、好感度变动记录等累计数据
+                            old_npc = existing_npcs[npc_name]
+                            for k, v in npc_data.items():
+                                old_npc[k] = v
+                            logger.debug(f"合并NPC '{npc_name}' 的更新数据（保留累计数据）")
+                        else:
+                            existing_npcs[npc_name] = npc_data
+                            logger.debug(f"新增NPC '{npc_name}' 完整对象")
+                    else:
+                        # 更新指令（含好感度变化、原因等）→ 走社交系统处理
+                        social_updates[npc_name] = npc_data
+                else:
+                    logger.warning(f"人物关系中 '{npc_name}' 的值不是dict: {type(npc_data)}")
+            if social_updates:
+                logger.info(
+                    f"拦截整体人物关系: {len(social_updates)} 个NPC走社交系统更新"
+                )
         else:
             regular_updates[key] = value
 
