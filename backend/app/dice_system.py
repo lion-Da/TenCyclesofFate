@@ -13,6 +13,8 @@ import logging
 import random
 from typing import Any
 
+from . import cultivation_system
+
 logger = logging.getLogger(__name__)
 
 # --- 常量 ---
@@ -48,6 +50,15 @@ ROLL_TYPE_TO_ATTRIBUTE_MAP: dict[str, list[str]] = {
     "威慑": ["胆魄", "筋骨"],
     "谈判": ["心境", "悟性"],
 }
+
+# 战力(功法)加成适用的判定类型关键词
+COMBAT_ROLL_KEYWORDS = [
+    "战斗", "攻击", "闪避", "防御", "格挡",
+    "斗法", "比斗", "交手", "对敌", "出招",
+    "剑", "刀", "拳", "掌", "法术",
+    "御敌", "迎战", "应战", "破阵", "施法",
+    "功法", "运功", "催动", "真元", "灵力",
+]
 
 
 def _find_relevant_attribute(roll_type: str, attributes: dict[str, Any]) -> int | None:
@@ -219,14 +230,25 @@ def calculate_final_success_rate(
     # 基础成功率(%)
     base_rate = (base_target / sides) * 100
 
-    # 从 current_life 中提取属性、道具、状态
+    # 从 current_life 中提取属性、道具、状态、功法
     attributes = {}
     items = []
     status_effects = []
+    combat_power = 0
     if current_life and isinstance(current_life, dict):
         attributes = current_life.get("属性", {}) or {}
         items = current_life.get("物品", []) or []
         status_effects = current_life.get("状态效果", []) or []
+        # 战力: 优先从属性中读取已计算值, 否则从功法列表实时算
+        combat_power = 0
+        try:
+            combat_power = int(attributes.get("战力", 0))
+        except (ValueError, TypeError):
+            pass
+        if not combat_power:
+            techniques = current_life.get("功法", []) or []
+            if techniques:
+                combat_power = cultivation_system.calculate_total_combat_power(techniques)
 
     # 计算各项加成
     attr_value = _find_relevant_attribute(roll_type, attributes)
@@ -234,8 +256,13 @@ def calculate_final_success_rate(
     item_bonus = _calculate_item_bonus(items, roll_type)
     status_bonus = _calculate_status_bonus(status_effects)
 
+    # 功法战力加成 (仅对战斗类判定生效)
+    combat_bonus = 0
+    if combat_power > 0 and any(kw in roll_type for kw in COMBAT_ROLL_KEYWORDS):
+        combat_bonus = cultivation_system.calculate_combat_power_bonus(combat_power)
+
     # 合计
-    total_bonus = attr_bonus + item_bonus + status_bonus
+    total_bonus = attr_bonus + item_bonus + status_bonus + combat_bonus
     final_rate = base_rate + total_bonus
 
     # 硬上限 95%，下限 5%（给玩家最低希望）
@@ -251,6 +278,8 @@ def calculate_final_success_rate(
         "attribute_bonus": attr_bonus,
         "item_bonus": item_bonus,
         "status_bonus": status_bonus,
+        "combat_power": combat_power,
+        "combat_bonus": combat_bonus,
         "total_bonus": total_bonus,
         "final_rate": round(final_rate, 1),
         "final_target": final_target,
@@ -259,6 +288,7 @@ def calculate_final_success_rate(
     logger.info(
         f"骰子判定计算: type={roll_type}, base={base_rate:.1f}%, "
         f"attr={attr_bonus:+d}%, item={item_bonus:+d}%, status={status_bonus:+d}%, "
+        f"combat={combat_bonus:+d}%(power={combat_power}), "
         f"final={final_rate:.1f}% (target={final_target}/{sides})"
     )
 

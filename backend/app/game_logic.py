@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import HTTPException, status
 
 from . import state_manager, cheat_check, redemption
-from . import dice_system, legacy_system, social_system
+from . import dice_system, legacy_system, social_system, cultivation_system
 from . import ai_service
 from .websocket_manager import manager as websocket_manager
 from .config import settings
@@ -465,6 +465,8 @@ async def _handle_roll_request(
         bonus_parts.append(f"道具{breakdown['item_bonus']:+d}%")
     if breakdown.get("status_bonus", 0) != 0:
         bonus_parts.append(f"状态{breakdown['status_bonus']:+d}%")
+    if breakdown.get("combat_bonus", 0) != 0:
+        bonus_parts.append(f"功法战力{breakdown['combat_bonus']:+d}%")
     if breakdown.get("legacy_bonus", 0) != 0:
         bonus_parts.append(f"功德{breakdown['legacy_bonus']:+d}%")
     if breakdown.get("difficulty_bonus") is not None:
@@ -864,6 +866,278 @@ def _effective_unchecked_rounds_for_cheat_check(raw_value: object) -> int:
     return v
 
 
+# --- 静态字段列表：这些字段在角色创建后不再变化，合并进"人物背景" ---
+STATIC_FIELDS = ["姓名", "性别", "外貌", "服饰", "出身", "初始天赋", "初始事件", "同行模式"]
+
+# --- 核心永久字段白名单：这些字段属于角色的固有状态，不会被自动清理 ---
+PERMANENT_FIELDS = {
+    "人物背景", "生命值", "最大生命值", "属性", "物品", "状态效果",
+    "位置", "故事事件", "人物关系", "功法", "灵石",
+    # 以下为旧版兼容（合并前的静态字段）
+    "姓名", "性别", "外貌", "服饰", "出身", "初始天赋", "初始事件", "同行模式",
+}
+
+# 临时事件字段的最大存活回合数 —— 超过此回合数无更新则自动清理
+EVENT_FIELD_MAX_AGE = 8
+
+# 故事事件摘要配置
+STORY_EVENTS_MAX_DETAIL = 5   # 保留最近N条完整事件
+STORY_EVENTS_MAX_TOTAL = 20   # 最大存储总数（含摘要后的旧事件）
+
+
+def _consolidate_static_fields(session: dict) -> None:
+    """
+    将 current_life 中的静态字段（姓名、性别、出身等）合并为一段
+    「人物背景」文本，然后从 current_life 中删除这些独立字段。
+    
+    - 此函数在试炼开始、AI返回首次state_update后调用一次。
+    - 合并后，后续发给AI的状态不再包含这些重复的静态文案，节省token。
+    - 「人物背景」字段同时作为前端展示的合并区域。
+    """
+    current_life = session.get("current_life")
+    if not current_life or not isinstance(current_life, dict):
+        return
+    
+    # 如果已经合并过，跳过
+    if "人物背景" in current_life:
+        return
+    
+    parts = []
+    name = current_life.get("姓名", "无名")
+    gender = current_life.get("性别", "")
+    appearance = current_life.get("外貌", "")
+    attire = current_life.get("服饰", "")
+    origin = current_life.get("出身", "")
+    talent = current_life.get("初始天赋", "")
+    initial_event = current_life.get("初始事件", "")
+    companion = current_life.get("同行模式", "")
+    
+    if name or gender:
+        parts.append(f"【{name}】{'·' + gender if gender else ''}")
+    if appearance:
+        parts.append(f"容貌：{appearance}")
+    if attire:
+        parts.append(f"衣着：{attire}")
+    if origin:
+        parts.append(f"出身：{origin}")
+    if talent:
+        parts.append(f"天赋：{talent}")
+    if initial_event:
+        parts.append(f"初始际遇：{initial_event}")
+    if companion:
+        parts.append(f"行旅：{companion}")
+    
+    if parts:
+        current_life["人物背景"] = "\n".join(parts)
+    
+    # 移除已合并的独立字段
+    for field in STATIC_FIELDS:
+        current_life.pop(field, None)
+    
+    logger.info(f"静态字段已合并为「人物背景」，释放 {len(STATIC_FIELDS)} 个字段")
+
+
+def _prune_story_events(current_life: dict) -> None:
+    """
+    精简故事事件列表，防止token无限膨胀。
+    
+    策略：
+    - 保留最近 STORY_EVENTS_MAX_DETAIL 条完整事件
+    - 更早的事件压缩为一条摘要行（如 "【前事摘要】共经历了N件旧事: xxx, xxx, ..."）
+    - 总数不超过 STORY_EVENTS_MAX_TOTAL
+    """
+    events = current_life.get("故事事件")
+    if not events or not isinstance(events, list):
+        return
+    
+    if len(events) <= STORY_EVENTS_MAX_DETAIL:
+        return  # 不需要精简
+    
+    # 分离：可能已有旧摘要（以"【前事摘要】"开头的条目）
+    old_summaries = []
+    real_events = []
+    for ev in events:
+        if isinstance(ev, str) and ev.startswith("【前事摘要】"):
+            old_summaries.append(ev)
+        else:
+            real_events.append(ev)
+    
+    if len(real_events) <= STORY_EVENTS_MAX_DETAIL:
+        return  # 实际事件不多，不需精简
+    
+    # 需要精简的旧事件
+    events_to_summarize = real_events[:-STORY_EVENTS_MAX_DETAIL]
+    recent_events = real_events[-STORY_EVENTS_MAX_DETAIL:]
+    
+    # 生成摘要：将旧事件压缩为简短列表
+    summarized_items = []
+    for ev in events_to_summarize:
+        if isinstance(ev, str):
+            # 截取每条事件的前20字作为摘要
+            summarized_items.append(ev[:20] + ("..." if len(ev) > 20 else ""))
+        elif isinstance(ev, dict):
+            summarized_items.append(str(ev.get("事件", str(ev)))[:20])
+    
+    # 合并旧摘要中的内容（如果有）
+    old_summary_count = 0
+    for os_text in old_summaries:
+        # 从旧摘要中提取计数
+        match = _re.search(r'共经历了(\d+)件旧事', os_text)
+        if match:
+            old_summary_count += int(match.group(1))
+    
+    total_old_count = old_summary_count + len(events_to_summarize)
+    summary_text = f"【前事摘要】共经历了{total_old_count}件旧事：{', '.join(summarized_items[-5:])}"
+    
+    # 重建事件列表
+    current_life["故事事件"] = [summary_text] + recent_events
+    
+    logger.info(
+        f"故事事件精简: {len(events)} → {len(current_life['故事事件'])} "
+        f"(摘要了{total_old_count}件旧事)"
+    )
+
+
+def _track_and_cleanup_event_fields(session: dict) -> list[str]:
+    """
+    追踪 current_life 中的临时事件字段（非永久字段白名单内的），
+    在字段长期无更新后自动清理。
+    
+    机制：
+    - session["_event_field_ages"] 记录每个临时字段的"未更新回合数"
+    - session["_event_fields_touched_this_round"] 记录本回合被更新的字段
+    - 每回合调用时：
+      - 本回合被 AI 更新过的字段 → 重置计数为 0
+      - 未被更新的字段 → 计数 +1
+      - 计数超过 EVENT_FIELD_MAX_AGE → 自动清除
+    
+    Returns:
+        被清理掉的字段名列表（用于日志/通知）
+    """
+    current_life = session.get("current_life")
+    if not current_life or not isinstance(current_life, dict):
+        return []
+    
+    ages: dict[str, int] = session.get("_event_field_ages", {})
+    touched: set = session.pop("_event_fields_touched_this_round", set())
+    cleaned = []
+    
+    # 识别当前所有非永久字段
+    temp_fields = set()
+    for key in list(current_life.keys()):
+        if key not in PERMANENT_FIELDS:
+            temp_fields.add(key)
+    
+    # 为新出现的临时字段初始化追踪
+    for field in temp_fields:
+        if field not in ages:
+            ages[field] = 0
+    
+    # 更新计数：被更新的重置为0，未更新的+1
+    for field in list(ages.keys()):
+        if field not in temp_fields:
+            # 字段已被删除（null或其他方式），清理记录
+            del ages[field]
+            continue
+        if field in touched:
+            ages[field] = 0  # 本回合有更新，重置
+        else:
+            ages[field] = ages.get(field, 0) + 1  # 老化
+    
+    # 清理超龄字段
+    for field in list(ages.keys()):
+        if ages[field] >= EVENT_FIELD_MAX_AGE:
+            if field in current_life:
+                del current_life[field]
+                cleaned.append(field)
+                logger.info(f"临时事件字段自动清理: '{field}' (超过{EVENT_FIELD_MAX_AGE}回合未更新)")
+            del ages[field]
+    
+    session["_event_field_ages"] = ages
+    return cleaned
+
+
+def _mark_event_fields_updated(session: dict, updated_keys: list[str]) -> None:
+    """
+    标记本回合被AI更新的临时事件字段。
+    在 _apply_state_update 后、_track_and_cleanup_event_fields 前调用。
+    
+    Args:
+        updated_keys: 本回合 state_update 中涉及的所有 key
+                      (如 "current_life.外门大比进程" → "外门大比进程")
+    """
+    touched: set = session.get("_event_fields_touched_this_round", set())
+    for key in updated_keys:
+        # 提取 current_life 下的直接字段名
+        parts = key.split(".")
+        if len(parts) >= 2 and parts[0] == "current_life":
+            field_name = parts[1].rstrip("+-")  # 去掉 +/- 后缀
+            if field_name not in PERMANENT_FIELDS:
+                touched.add(field_name)
+    session["_event_fields_touched_this_round"] = touched
+
+
+def _build_compact_state_for_ai(session: dict) -> dict:
+    """
+    构建发送给AI的精简状态副本，减少token开销：
+    1. 排除「人物背景」(静态文案，AI已在内部历史中见过)
+    2. 只保留最近的故事事件
+    3. 排除 internal_history, display_history 等非游戏状态
+    """
+    session_copy = deepcopy(session)
+    session_copy.pop("internal_history", None)
+    session_copy.pop("difficulty", None)
+    session_copy.pop("_event_field_ages", None)
+    session_copy.pop("_event_fields_touched_this_round", None)
+    
+    # 精简 display_history
+    session_copy["display_history"] = (
+        "\n".join(session_copy.get("display_history", []))
+    )[-300:]
+    
+    current_life = session_copy.get("current_life")
+    if current_life and isinstance(current_life, dict):
+        # 不发送人物背景给AI（静态文案，开局已见过）
+        current_life.pop("人物背景", None)
+    
+    return session_copy
+
+
+def _remove_item_from_list(current_list: list, removal) -> None:
+    """
+    从列表中移除一个元素。
+    支持多种格式：
+    - 字符串: 按名称匹配 (移除物品名称相同的第一个)
+    - 字典 {"名称": "xxx"}: 按名称匹配物品字典
+    - 字典 {"名称": "xxx", "数量": N}: 只扣减数量，数量归零才移除
+    """
+    if isinstance(removal, str):
+        # 按名称匹配
+        for i, item in enumerate(current_list):
+            if isinstance(item, dict) and item.get("名称") == removal:
+                qty = item.get("数量", 1)
+                if qty > 1:
+                    item["数量"] = qty - 1
+                else:
+                    current_list.pop(i)
+                return
+            elif isinstance(item, str) and item == removal:
+                current_list.pop(i)
+                return
+    elif isinstance(removal, dict):
+        target_name = removal.get("名称", "")
+        remove_qty = removal.get("数量", 1)
+        for i, item in enumerate(current_list):
+            if isinstance(item, dict) and item.get("名称") == target_name:
+                current_qty = item.get("数量", 1)
+                remaining = current_qty - remove_qty
+                if remaining <= 0:
+                    current_list.pop(i)
+                else:
+                    item["数量"] = remaining
+                return
+
+
 def _apply_state_update(state: dict, update: dict) -> dict:
     # --- 社交系统：拦截并处理人物关系更新 ---
     social_updates = {}
@@ -890,13 +1164,30 @@ def _apply_state_update(state: dict, update: dict) -> dict:
                 temp_state[part] = {}
             temp_state = temp_state[part]
 
-        # Handle list append/extend operations
+        # Handle null → delete field (AI sets value to null to clean up)
+        if value is None:
+            final_key = keys[-1]
+            if final_key in temp_state:
+                del temp_state[final_key]
+                logger.debug(f"字段已清除: {key}")
+            continue
+
+        # Handle list append/extend operations (key+)
         if keys[-1].endswith("+") and isinstance(temp_state.get(keys[-1][:-1]), list):
             list_key = keys[-1][:-1]
             if isinstance(value, list):
                 temp_state[list_key].extend(value)
             else:
                 temp_state[list_key].append(value)
+
+        # Handle list removal operations (key-)
+        # Supports: "current_life.物品-": ["疗伤草"] or "current_life.物品-": [{"名称":"疗伤草"}]
+        elif keys[-1].endswith("-") and isinstance(temp_state.get(keys[-1][:-1]), list):
+            list_key = keys[-1][:-1]
+            items_to_remove = value if isinstance(value, list) else [value]
+            current_list = temp_state[list_key]
+            for removal in items_to_remove:
+                _remove_item_from_list(current_list, removal)
         else:
             temp_state[keys[-1]] = value
 
@@ -914,7 +1205,51 @@ def _apply_state_update(state: dict, update: dict) -> dict:
         except Exception as e:
             logger.error(f"社交系统处理失败: {e}", exc_info=True)
 
+    # --- 功法系统：自动计算战力 ---
+    _recalculate_combat_power(state)
+
     return state
+
+
+def _recalculate_combat_power(state: dict):
+    """
+    当 current_life 中的功法列表变动时，自动重算战力并写入属性。
+    战力 = 主功法战力(100%) + 辅助功法(各20%)
+    """
+    current_life = state.get("current_life")
+    if not current_life or not isinstance(current_life, dict):
+        return
+
+    techniques = current_life.get("功法")
+    if techniques is None:
+        # AI 可能尚未生成功法字段，不做处理
+        return
+
+    if not isinstance(techniques, list):
+        techniques = [techniques] if techniques else []
+        current_life["功法"] = techniques
+
+    total_power = cultivation_system.calculate_total_combat_power(techniques)
+
+    # 写入属性.战力
+    attributes = current_life.get("属性")
+    if attributes is None:
+        attributes = {}
+        current_life["属性"] = attributes
+
+    old_power = 0
+    try:
+        old_power = int(attributes.get("战力", 0))
+    except (ValueError, TypeError):
+        pass
+
+    if total_power != old_power:
+        attributes["战力"] = total_power
+        if total_power > 0:
+            logger.info(
+                f"功法战力更新: {old_power} → {total_power} "
+                f"(功法数: {len(techniques)})"
+            )
 
 
 async def _stream_narrative_to_player(player_id: str, narrative: str, stream_id: str):
@@ -1498,6 +1833,7 @@ def _decode_json_string_value(buf: str) -> str:
 def _build_action_prompt(session_copy: dict, action: str) -> str:
     """
     构建包含社交上下文的 AI prompt。
+    使用精简后的状态副本，减少 token 开销。
     """
     base = f'这是当前的游戏状态JSON:\n{json.dumps(session_copy, ensure_ascii=False)}'
 
@@ -1514,7 +1850,17 @@ def _build_action_prompt(session_copy: dict, action: str) -> str:
         f'玩家的行动是: "{action}"\n\n'
         f'请根据状态和行动，生成包含`narrative`和(`state_update`或`roll_request`)的JSON作为回应。'
         f'如果角色死亡，请在叙述中说明，并在`state_update`中同时将`is_in_trial`设为`false`，`current_life`设为`null`。'
-        f'如果有NPC互动，请在state_update中更新人物关系（格式: "current_life.人物关系.NPC名":{{...}}）。'
+        f'\n【人物关系·必须更新】如果本回合有任何NPC互动（包括首次结识的新NPC、好感度变化、关系推进），'
+        f'**必须**在state_update中更新人物关系。格式: "current_life.人物关系.NPC名": {{"好感度变化": N, "原因": "..."}}。'
+        f'首次出现的新NPC还需加"新NPC":{{"性格":"...","身份":"...","初始好感度":N}}字段。'
+        f'【切记】只要叙事中出现了有意义的NPC互动，就必须在state_update中体现，不可遗漏！'
+        f'\n如果角色领悟/获得新功法，请在state_update中更新功法列表（追加用"current_life.功法+":[ ]，替换用"current_life.功法":[ ]）。'
+        f'功法格式:{{"名称":"...","品阶":"黄/玄/地/天","等阶":"下品/中品/上品/极品","类型":"...","描述":"..."}}'
+        f'\n【物品消耗】若玩家使用了消耗性物品，必须在state_update中移除该物品：'
+        f'"current_life.物品-": ["物品名称"] 或 "current_life.物品-": [{{"名称":"物品名","数量":1}}]。'
+        f'数量>1的物品只扣减数量，数量归零才移除。'
+        f'\n【事件字段清理】若某个多回合事件已经结束（如大比、任务、探索），'
+        f'请将相关的临时字段设为null清除，如: "current_life.外门大比进程": null。'
     )
     return prompt
 
@@ -1584,13 +1930,7 @@ async def _process_player_action_async(user_info: dict, action: str):
             session["difficulty"] = difficulty_name
             logger.info(f"Trial start for {player_id}: companion={companion_mode}, difficulty={difficulty_name}")
 
-        session_copy = deepcopy(session)
-        session_copy.pop("internal_history", 0)
-        # ── 移除 difficulty 字段，避免 AI 看到"气运之父/子"等词汇 ──
-        session_copy.pop("difficulty", None)
-        session_copy["display_history"] = (
-            "\n".join(session_copy.get("display_history", []))
-        )[-300:]
+        session_copy = _build_compact_state_for_ai(session)
         prompt_for_ai = (
             START_GAME_PROMPT.format(companion_mode=companion_mode)
             if is_first_ever_trial_of_day
@@ -1723,6 +2063,21 @@ async def _process_player_action_async(user_info: dict, action: str):
                 f"\n\n【人缘变动】\n\n{social_text}"
             )
 
+        # --- 故事事件精简：每次状态更新后自动精简 ---
+        if session.get("current_life"):
+            _prune_story_events(session["current_life"])
+
+        # --- 临时事件字段管理：标记更新 + 自动清理超龄字段 ---
+        if state_update:
+            _mark_event_fields_updated(session, list(state_update.keys()))
+        if session.get("current_life"):
+            cleaned_fields = _track_and_cleanup_event_fields(session)
+            if cleaned_fields:
+                cleanup_text = "、".join(f"「{f}」" for f in cleaned_fields)
+                session["display_history"].append(
+                    f"\n\n*{cleanup_text}已随因果消散，不再显示。*"
+                )
+
         # --- 难度系统：开局时根据难度钳制属性 ---
         if is_starting_trial and session.get("current_life"):
             preset = _get_difficulty_preset(session)
@@ -1732,6 +2087,10 @@ async def _process_player_action_async(user_info: dict, action: str):
                     f"Difficulty '{preset['label']}' applied for {player_id}: "
                     f"attr_min={preset.get('attr_min')}, attr_max={preset.get('attr_max')}"
                 )
+
+        # --- 静态字段合并：开局后将姓名/出身等静态信息合并为「人物背景」 ---
+        if is_starting_trial and session.get("current_life"):
+            _consolidate_static_fields(session)
 
         # --- 继承系统：试炼开始时应用先天奖励 ---
         if is_starting_trial and session.get("current_life"):

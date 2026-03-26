@@ -73,6 +73,9 @@ const DOMElements = {
     fullscreenButton: document.getElementById('fullscreen-button'),
     narrativeWindow: document.getElementById('narrative-window'),
     characterStatus: document.getElementById('character-status'),
+    cultivationPanel: document.getElementById('cultivation-panel'),
+    cultivationTechniques: document.getElementById('cultivation-techniques'),
+    cultivationPower: document.getElementById('cultivation-power'),
     opportunitiesSpan: document.getElementById('opportunities'),
     actionInput: document.getElementById('action-input'),
     actionButton: document.getElementById('action-button'),
@@ -605,6 +608,25 @@ function showLoading(isLoading) {
     }
 }
 
+/**
+ * 立即在叙事窗口底部注入"天道演化中"提示。
+ * 在 handleAction 发送后立刻调用，无需等后端推送 is_processing。
+ * 若已有提示则不重复添加；后续 render() 或流式开始时会自然替换。
+ */
+function _injectProcessingHint() {
+    if (!DOMElements.narrativeWindow) return;
+    // 已经存在则跳过
+    if (DOMElements.narrativeWindow.querySelector('.narrative-processing-hint')) return;
+    
+    const hint = document.createElement('div');
+    hint.className = 'narrative-processing-hint';
+    hint.innerHTML = '<span class="processing-dot-1">·</span><span class="processing-dot-2">·</span><span class="processing-dot-3">·</span> 天道演化中 <span class="processing-dot-1">·</span><span class="processing-dot-2">·</span><span class="processing-dot-3">·</span>';
+    DOMElements.narrativeWindow.appendChild(hint);
+    
+    // 滚动到底部让提示可见
+    DOMElements.narrativeWindow.scrollTop = DOMElements.narrativeWindow.scrollHeight;
+}
+
 // --- Safety Timeout ---
 // 防止后端异常导致 is_processing 永远为 true，玩家被永久锁定
 function _startSafetyTimeout() {
@@ -807,17 +829,149 @@ function renderCharacterStatus() {
 
     if (!current_life) {
         container.textContent = '静待天命...';
+        renderCultivationPanel(null);
         renderSocialRelations(null);
         return;
     }
 
-    Object.entries(current_life).forEach(([key, value]) => {
-        // 人物关系由专门的面板渲染，跳过
-        if (key === '人物关系') return;
+    // --- 定义渲染顺序和特殊处理 ---
+    const SKIP_KEYS = ['人物关系', '功法'];
+    const PERMANENT_KEYS = new Set([
+        '人物背景', '生命值', '最大生命值', '属性', '物品', '状态效果',
+        '位置', '故事事件', '灵石',
+        // 旧版静态字段兼容
+        '姓名', '性别', '外貌', '服饰', '出身', '初始天赋', '初始事件', '同行模式',
+    ]);
+    const PRIORITY_KEYS = ['人物背景', '生命值', '灵石', '属性', '物品', '状态效果', '位置', '故事事件'];
 
+    // 收集所有需要渲染的 key，优先级排列
+    const allKeys = Object.keys(current_life);
+    const orderedKeys = [];
+    for (const pk of PRIORITY_KEYS) {
+        if (allKeys.includes(pk)) orderedKeys.push(pk);
+    }
+    for (const k of allKeys) {
+        if (!orderedKeys.includes(k) && !SKIP_KEYS.includes(k)) orderedKeys.push(k);
+    }
+
+    orderedKeys.forEach((key) => {
+        if (SKIP_KEYS.includes(key)) return;
+        const value = current_life[key];
+
+        // ── 人物背景: 特殊渲染为固定展开的概要区 ──
+        if (key === '人物背景') {
+            const bgSection = document.createElement('div');
+            bgSection.classList.add('character-background-section');
+
+            const bgTitle = document.createElement('div');
+            bgTitle.classList.add('character-background-title');
+            // 提取姓名（第一行通常是 【姓名】·性别）
+            const firstLine = (typeof value === 'string' ? value.split('\n')[0] : '角色信息');
+            bgTitle.textContent = firstLine;
+            bgSection.appendChild(bgTitle);
+
+            const bgDetails = document.createElement('details');
+            bgDetails.classList.add('character-background-details');
+            const bgSummary = document.createElement('summary');
+            bgSummary.textContent = '详细背景';
+            bgDetails.appendChild(bgSummary);
+
+            const bgContent = document.createElement('div');
+            bgContent.classList.add('character-background-content');
+            // 除第一行外的其余内容
+            if (typeof value === 'string') {
+                const lines = value.split('\n').slice(1);
+                lines.forEach(line => {
+                    if (!line.trim()) return;
+                    const p = document.createElement('p');
+                    p.classList.add('background-line');
+                    p.textContent = line;
+                    bgContent.appendChild(p);
+                });
+            }
+            bgDetails.appendChild(bgContent);
+            bgSection.appendChild(bgDetails);
+            container.appendChild(bgSection);
+            return;
+        }
+
+        // ── 故事事件: 特殊渲染 ──
+        if (key === '故事事件' && Array.isArray(value)) {
+            const details = document.createElement('details');
+            const summary = document.createElement('summary');
+            summary.textContent = `故事事件 (${value.length})`;
+            details.appendChild(summary);
+
+            const content = document.createElement('div');
+            content.classList.add('details-content', 'story-events-list');
+
+            value.forEach((ev, idx) => {
+                const evDiv = document.createElement('div');
+                const evText = typeof ev === 'string' ? ev : JSON.stringify(ev);
+                const isSummary = evText.startsWith('【前事摘要】');
+                evDiv.classList.add('story-event-item');
+                if (isSummary) evDiv.classList.add('story-event-summary');
+                // 最近3条高亮
+                if (!isSummary && idx >= value.length - 3) {
+                    evDiv.classList.add('story-event-recent');
+                }
+                evDiv.textContent = evText;
+                content.appendChild(evDiv);
+            });
+
+            details.appendChild(content);
+            // 故事事件默认展开
+            details.open = true;
+            container.appendChild(details);
+            return;
+        }
+
+        // ── 物品: 增强渲染，显示数量 ──
+        if (key === '物品' && Array.isArray(value)) {
+            const details = document.createElement('details');
+            const summary = document.createElement('summary');
+            summary.textContent = `物品 (${value.length})`;
+            details.appendChild(summary);
+
+            const content = document.createElement('div');
+            content.classList.add('details-content', 'items-list');
+
+            if (value.length === 0) {
+                const empty = document.createElement('div');
+                empty.classList.add('property-value');
+                empty.textContent = '身无长物';
+                content.appendChild(empty);
+            } else {
+                value.forEach(item => {
+                    const itemDiv = document.createElement('div');
+                    itemDiv.classList.add('item-entry');
+                    if (typeof item === 'object' && item !== null) {
+                        const name = item['名称'] || '未知物品';
+                        const qty = item['数量'] || 1;
+                        const effect = item['效果'] || item['描述'] || '';
+                        itemDiv.innerHTML = `<span class="item-name">${name}</span>` +
+                            (qty > 1 ? `<span class="item-qty">×${qty}</span>` : '') +
+                            (effect ? `<span class="item-effect">${effect}</span>` : '');
+                    } else {
+                        itemDiv.textContent = String(item);
+                    }
+                    content.appendChild(itemDiv);
+                });
+            }
+
+            details.appendChild(content);
+            details.open = true;
+            container.appendChild(details);
+            return;
+        }
+
+        // ── 默认渲染逻辑 ──
+        // 区分永久字段和临时事件字段
+        const isEventField = !PERMANENT_KEYS.has(key);
         const details = document.createElement('details');
+        if (isEventField) details.classList.add('event-field');
         const summary = document.createElement('summary');
-        summary.textContent = key;
+        summary.textContent = isEventField ? `▸ ${key}` : key;
         details.appendChild(summary);
 
         const content = document.createElement('div');
@@ -829,7 +983,88 @@ function renderCharacterStatus() {
         container.appendChild(details);
     });
 
+    renderCultivationPanel(current_life);
     renderSocialRelations(current_life);
+}
+
+// --- 功法品阶配置 ---
+const GRADE_CONFIG = {
+    '天': { color: '#ff4500', icon: '☳', rank: 4 },
+    '地': { color: '#cd853f', icon: '☲', rank: 3 },
+    '玄': { color: '#6a5acd', icon: '☱', rank: 2 },
+    '黄': { color: '#b8860b', icon: '☰', rank: 1 },
+};
+
+const TIER_RANK = { '极品': 4, '上品': 3, '中品': 2, '下品': 1 };
+
+function renderCultivationPanel(currentLife) {
+    const panel = DOMElements.cultivationPanel;
+    const container = DOMElements.cultivationTechniques;
+    const powerDisplay = DOMElements.cultivationPower;
+    if (!panel || !container) return;
+
+    const techniques = currentLife ? currentLife['功法'] : null;
+    if (!techniques || !Array.isArray(techniques) || techniques.length === 0) {
+        panel.classList.add('hidden');
+        return;
+    }
+
+    panel.classList.remove('hidden');
+    container.innerHTML = '';
+
+    // Helper to escape HTML
+    const esc = (str) => {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    };
+
+    // Sort: higher grade first, then higher tier
+    const sorted = [...techniques].sort((a, b) => {
+        const ga = GRADE_CONFIG[a['品阶']]?.rank || 0;
+        const gb = GRADE_CONFIG[b['品阶']]?.rank || 0;
+        if (gb !== ga) return gb - ga;
+        return (TIER_RANK[b['等阶']] || 0) - (TIER_RANK[a['等阶']] || 0);
+    });
+
+    sorted.forEach(tech => {
+        if (!tech || typeof tech !== 'object') return;
+
+        const name = tech['名称'] || '未知功法';
+        const grade = tech['品阶'] || '黄';
+        const tier = tech['等阶'] || '下品';
+        const type = tech['类型'] || '';
+        const desc = tech['描述'] || '';
+
+        const config = GRADE_CONFIG[grade] || GRADE_CONFIG['黄'];
+        const gradeLabel = `${grade}阶${tier}`;
+
+        const card = document.createElement('div');
+        card.classList.add('cultivation-card', `cultivation-grade-${grade}`);
+
+        card.innerHTML = `
+            <div class="cultivation-card-header">
+                <span class="cultivation-icon" style="color:${config.color}">${config.icon}</span>
+                <span class="cultivation-name">${esc(name)}</span>
+                <span class="cultivation-grade-badge" style="border-color:${config.color};color:${config.color}">${esc(gradeLabel)}</span>
+            </div>
+            ${type ? `<div class="cultivation-type">${esc(type)}</div>` : ''}
+            ${desc ? `<div class="cultivation-desc">${esc(desc)}</div>` : ''}
+        `;
+
+        container.appendChild(card);
+    });
+
+    // Display total combat power
+    if (powerDisplay) {
+        const combatPower = currentLife['属性']?.['战力'] || 0;
+        if (combatPower > 0) {
+            powerDisplay.innerHTML = `<span class="cultivation-power-label">总战力</span><span class="cultivation-power-value">${combatPower}</span>`;
+            powerDisplay.classList.remove('hidden');
+        } else {
+            powerDisplay.classList.add('hidden');
+        }
+    }
 }
 
 function renderSocialRelations(currentLife) {
@@ -963,6 +1198,16 @@ function renderRollEvent(rollEvent) {
             label: '状态修正',
             value: `${breakdown.status_bonus > 0 ? '+' : ''}${breakdown.status_bonus}%`,
             cls: breakdown.status_bonus > 0 ? 'positive' : 'negative'
+        });
+    }
+
+    // Combat power (功法战力) bonus
+    if (breakdown.combat_bonus && breakdown.combat_bonus !== 0) {
+        const powerLabel = breakdown.combat_power ? `(战力:${breakdown.combat_power})` : '';
+        items.push({
+            label: `功法加成 ${powerLabel}`,
+            value: `+${breakdown.combat_bonus}%`,
+            cls: 'positive'
         });
     }
 
@@ -1137,6 +1382,9 @@ function handleAction(actionOverride = null) {
 
     DOMElements.actionInput.value = '';
     socketManager.sendAction(action);
+    
+    // --- 立即显示处理中提示（不等后端 state 推送） ---
+    _injectProcessingHint();
 }
 
 function showCompanionChoice() {

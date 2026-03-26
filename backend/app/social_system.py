@@ -568,21 +568,27 @@ def process_social_state_update(current_life: dict, social_update: dict) -> list
         if not isinstance(update, dict):
             continue
 
-        # 处理新 NPC 加入
-        if "新NPC" in update and npc_name not in npcs:
-            new_npc_data = update["新NPC"]
+        # 处理新 NPC 加入（显式标记 或 隐式首次出现）
+        if npc_name not in npcs:
+            new_npc_data = update.get("新NPC", {})
             if not isinstance(new_npc_data, dict):
                 new_npc_data = {}
+            # 即使没有"新NPC"字段，只要NPC名字不在人物关系中，
+            # 就自动创建条目（AI可能只输出好感度变化而忘记加"新NPC"标记）
             npc = create_npc_template(
                 name=str(npc_name),
-                personality=str(new_npc_data.get("性格", "") or ""),
-                affinity=_safe_int(new_npc_data.get("初始好感度", 0), 0),
+                personality=str(new_npc_data.get("性格", update.get("性格", "")) or ""),
+                affinity=_safe_int(
+                    new_npc_data.get("初始好感度", update.get("初始好感度", 0)), 0
+                ),
             )
-            npc["身份"] = str(new_npc_data.get("身份", "") or "")
+            npc["身份"] = str(
+                new_npc_data.get("身份", update.get("身份", "")) or ""
+            )
             npc["关系阶段"] = get_affinity_stage(npc["好感度"])["name"]
             npcs[npc_name] = npc
-            messages.append(f"结识新人: {npc_name} ({npc.get('身份', '未知身份')})")
-            logger.info(f"新NPC加入: {npc_name}")
+            messages.append(f"结识新人: {npc_name} ({npc.get('身份', '') or '未知身份'})")
+            logger.info(f"新NPC加入: {npc_name} (auto-created={'新NPC' not in update})")
 
         npc = npcs.get(npc_name)
         if not npc:
