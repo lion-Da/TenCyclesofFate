@@ -1343,6 +1343,28 @@ body.app-fullscreen #app-container {
     text-shadow: 0 0 3px rgba(255, 255, 255, 0.8);
 }
 
+/* NPC 详情展开区域 */
+.npc-details-section {
+    margin-top: 6px;
+    padding: 6px 8px;
+    background: rgba(0, 0, 0, 0.08);
+    border-top: 1px dashed rgba(128, 100, 70, 0.3);
+    border-radius: 0 0 4px 4px;
+    font-size: 0.75rem;
+    color: var(--text-muted, #6b5b4b);
+    line-height: 1.6;
+}
+
+.npc-detail-item {
+    display: block;
+    padding: 1px 0;
+}
+
+.npc-detail-item::before {
+    content: '· ';
+    color: #a08060;
+}
+
 /* --- Legacy System --- */
 .legacy-toggle-btn {
     padding: 0.6rem 1.2rem;

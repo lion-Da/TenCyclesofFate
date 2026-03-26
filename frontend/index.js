@@ -1136,6 +1136,40 @@ function renderSocialRelations(currentLife) {
             ? `<span class="social-marks">${marks.map(m => `【${esc(String(m))}】`).join('')}</span>`
             : '';
 
+        // 构建详情区域（根据可见性数据动态生成）
+        let detailsHtml = '';
+        const realm = npc['境界'];
+        const gongfa = npc['功法'];
+        const zhanli = npc['战力'];
+        const hp = npc['生命值'];
+        const maxHp = npc['最大生命值'];
+        const items = npc['物品'];
+
+        const detailLines = [];
+        if (realm) detailLines.push(`<span class="npc-detail-item">境界: ${esc(String(realm))}</span>`);
+        if (gongfa && Array.isArray(gongfa) && gongfa.length > 0) {
+            const gfText = gongfa.map(g =>
+                typeof g === 'object' ? `${g['名称'] || '?'}(${g['品阶'] || '?'})` : String(g)
+            ).join('、');
+            detailLines.push(`<span class="npc-detail-item">功法: ${esc(gfText)}</span>`);
+        }
+        if (zhanli != null) detailLines.push(`<span class="npc-detail-item">战力: ${zhanli}</span>`);
+        if (hp != null && maxHp != null) {
+            detailLines.push(`<span class="npc-detail-item">生命: ${hp}/${maxHp}</span>`);
+        }
+        if (items && Array.isArray(items) && items.length > 0) {
+            const itemText = items.map(i => typeof i === 'string' ? i : (i['名称'] || JSON.stringify(i))).join('、');
+            detailLines.push(`<span class="npc-detail-item">物品: ${esc(itemText)}</span>`);
+        }
+
+        if (detailLines.length > 0) {
+            detailsHtml = `
+                <div class="npc-details-section" style="display:none;">
+                    ${detailLines.join('\n')}
+                </div>
+            `;
+        }
+
         card.innerHTML = `
             <div class="social-npc-header">
                 <span class="social-npc-name">${esc(String(name))}</span>
@@ -1150,7 +1184,19 @@ function renderSocialRelations(currentLife) {
                 <div class="social-affinity-bar" style="width:${barPercent}%;background:${barColor}"></div>
                 <span class="social-affinity-score">${score > 0 ? '+' : ''}${score}</span>
             </div>
+            ${detailsHtml}
         `;
+
+        // 点击卡片展开/收起详情
+        if (detailLines.length > 0) {
+            card.style.cursor = 'pointer';
+            card.addEventListener('click', () => {
+                const details = card.querySelector('.npc-details-section');
+                if (details) {
+                    details.style.display = details.style.display === 'none' ? 'block' : 'none';
+                }
+            });
+        }
 
         container.appendChild(card);
     });

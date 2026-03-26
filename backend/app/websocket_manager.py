@@ -42,11 +42,34 @@ class ConnectionManager:
             logger.info(f"Player '{player_id}' disconnected from WebSocket.")
 
     def _prepare_player_payload(self, data: dict) -> dict:
-        """Prepare payload for the actual player (remove internal_history)."""
+        """Prepare payload for the actual player (remove internal_history, filter NPC visibility)."""
         payload = copy.deepcopy(data)
         if payload.get("data"):
             payload["data"].pop("internal_history", None)
+            # 过滤 NPC 数据的可见性 —— 好感度低时隐藏详细战斗属性
+            self._filter_npc_visibility(payload["data"])
         return payload
+
+    @staticmethod
+    def _filter_npc_visibility(session_data: dict):
+        """根据好感度过滤 NPC 详细属性的可见性。"""
+        current_life = session_data.get("current_life")
+        if not current_life or not isinstance(current_life, dict):
+            return
+        npcs = current_life.get("人物关系")
+        if not npcs or not isinstance(npcs, dict):
+            return
+        try:
+            from . import social_system
+            filtered = {}
+            for name, npc in npcs.items():
+                if isinstance(npc, dict):
+                    filtered[name] = social_system.get_npc_visible_data(npc)
+                else:
+                    filtered[name] = npc
+            current_life["人物关系"] = filtered
+        except Exception:
+            pass  # 过滤失败不影响正常推送
 
     def _prepare_live_payload(self, data: dict) -> dict:
         """Prepare payload for live viewers (stripped-down and secure)."""

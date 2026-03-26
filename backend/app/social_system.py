@@ -602,18 +602,91 @@ def create_npc_template(
     """
     创建一个标准 NPC 数据模板。
 
-    AI 在 state_update 中创建新 NPC 时应遵循此结构。
+    NPC 数据分为两层：
+    - 社交层（好感度、关系阶段等）：始终存在
+    - 战斗/修炼层（境界、功法、战力等）：可选，由 AI 在叙事中逐步补充
+
+    好感度达到一定阶段后，玩家可查看 NPC 的详细战斗属性：
+    - 相识(20+): 可见 身份、性格
+    - 知交(40+): 可见 境界、功法概要
+    - 挚友(60+): 可见 全部属性、物品
     """
     return {
+        # ── 基础信息 ──
         "姓名": name,
-        "好感度": max(MIN_AFFINITY, min(MAX_AFFINITY, affinity)),
-        "关系阶段": relation,
         "性格": personality,
         "身份": "",
+        # ── 社交系统 ──
+        "好感度": max(MIN_AFFINITY, min(MAX_AFFINITY, affinity)),
+        "关系阶段": relation,
         "已突破阈值": [],
         "好感度变动记录": [],
         "特殊标记": [],  # 如 "结拜", "道侣", "宿敌" 等
+        # ── 战斗/修炼属性（AI 可选填充，默认为空/None 表示尚未探知） ──
+        "境界": None,       # 如 "练气三层", "筑基初期"
+        "功法": None,       # 如 [{"名称": "xxx", "品阶": "黄", "等阶": "下品"}]
+        "战力": None,       # 数值
+        "物品": None,       # 如 ["飞剑", "护身玉佩"]
+        "生命值": None,     # 数值
+        "最大生命值": None,  # 数值
     }
+
+
+# NPC 属性可见性阈值 — 好感度达到此值才能查看对应类别的详细信息
+NPC_VISIBILITY_THRESHOLDS = {
+    "基础": 0,     # 姓名、关系阶段、好感度条 — 始终可见
+    "身份": 20,    # 身份、性格 — 相识后可见
+    "境界": 40,    # 境界、功法概要 — 知交后可见
+    "详细": 60,    # 全部属性、物品、战力 — 挚友后可见
+}
+
+
+def get_npc_visible_data(npc: dict) -> dict:
+    """
+    根据好感度阶段返回玩家可见的 NPC 数据子集。
+    
+    Args:
+        npc: 完整的 NPC 数据字典
+    
+    Returns:
+        过滤后的 NPC 数据（只包含玩家有权查看的字段）
+    """
+    score = _safe_int(npc.get("好感度", 0), 0)
+    
+    # 始终可见
+    visible = {
+        "姓名": npc.get("姓名", "???"),
+        "好感度": score,
+        "关系阶段": npc.get("关系阶段", "陌生"),
+        "特殊标记": npc.get("特殊标记", []),
+    }
+    
+    # 相识(20+): 基础个人信息
+    if score >= NPC_VISIBILITY_THRESHOLDS["身份"]:
+        visible["身份"] = npc.get("身份", "")
+        visible["性格"] = npc.get("性格", "")
+    
+    # 知交(40+): 修炼概况
+    if score >= NPC_VISIBILITY_THRESHOLDS["境界"]:
+        visible["境界"] = npc.get("境界")
+        gongfa = npc.get("功法")
+        if gongfa and isinstance(gongfa, list):
+            # 只显示功法名称和品阶，不显示详细描述
+            visible["功法"] = [
+                {"名称": g.get("名称", "?"), "品阶": g.get("品阶", "?")}
+                for g in gongfa if isinstance(g, dict)
+            ]
+        else:
+            visible["功法"] = gongfa
+    
+    # 挚友(60+): 全部战斗属性
+    if score >= NPC_VISIBILITY_THRESHOLDS["详细"]:
+        visible["战力"] = npc.get("战力")
+        visible["物品"] = npc.get("物品")
+        visible["生命值"] = npc.get("生命值")
+        visible["最大生命值"] = npc.get("最大生命值")
+    
+    return visible
 
 
 def process_social_state_update(current_life: dict, social_update: dict) -> list[str]:
@@ -780,6 +853,17 @@ def process_social_state_update(current_life: dict, social_update: dict) -> list
                     existing.append(m)
                     messages.append(f"与{npc_name}建立了特殊关系:【{m}】")
             npc["特殊标记"] = existing
+
+        # 处理NPC战斗/修炼属性更新
+        # AI 可以在社交更新中附带 NPC 的战斗属性变化
+        _NPC_COMBAT_FIELDS = ("境界", "功法", "战力", "物品", "生命值", "最大生命值")
+        for field in _NPC_COMBAT_FIELDS:
+            if field in update:
+                old_val = npc.get(field)
+                new_val = update[field]
+                npc[field] = new_val
+                if old_val != new_val and new_val is not None:
+                    logger.info(f"NPC属性更新: {npc_name}.{field} = {new_val}")
 
     current_life["人物关系"] = npcs
     return messages
