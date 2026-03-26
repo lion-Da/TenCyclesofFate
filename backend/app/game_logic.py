@@ -1266,7 +1266,53 @@ def _apply_state_update(state: dict, update: dict) -> dict:
     # --- 功法系统：自动计算战力 ---
     _recalculate_combat_power(state)
 
+    # --- 数据层英文key残留清理 ---
+    # AI偶尔在 current_life 里直接写入英文key，需要合并到对应的中文key
+    _cleanup_english_keys_in_current_life(state)
+
     return state
+
+
+def _cleanup_english_keys_in_current_life(state: dict):
+    """
+    清理 current_life 中残留的英文key。
+    如果同一字段的中英文版本同时存在，合并后移除英文版本。
+    如果只有英文版本，重命名为中文。
+    """
+    current_life = state.get("current_life")
+    if not current_life or not isinstance(current_life, dict):
+        return
+
+    keys_to_remove = []
+    keys_to_add = {}
+
+    for key in list(current_life.keys()):
+        cn_key = _EN_TO_CN_KEY_MAP.get(key.lower())
+        if not cn_key or cn_key == key:
+            continue  # 已经是中文key或不在映射中
+
+        en_value = current_life[key]
+        cn_value = current_life.get(cn_key)
+
+        if cn_value is not None:
+            # 两者都存在 → 合并列表，或保留中文版本
+            if isinstance(cn_value, list) and isinstance(en_value, list):
+                # 合并列表并去重
+                for item in en_value:
+                    if item not in cn_value:
+                        cn_value.append(item)
+            # 非列表情况：保留中文版本（更可能是最新的）
+        else:
+            # 只有英文版本 → 重命名为中文
+            keys_to_add[cn_key] = en_value
+
+        keys_to_remove.append(key)
+
+    for key in keys_to_remove:
+        del current_life[key]
+        logger.debug(f"清理current_life英文key残留: '{key}'")
+    for key, value in keys_to_add.items():
+        current_life[key] = value
 
 
 def _recalculate_combat_power(state: dict):
@@ -2146,8 +2192,9 @@ async def _process_player_action_async(user_info: dict, action: str):
                     f"attr_min={preset.get('attr_min')}, attr_max={preset.get('attr_max')}"
                 )
 
-        # --- 静态字段合并：开局后将姓名/出身等静态信息合并为「人物背景」 ---
-        if is_starting_trial and session.get("current_life"):
+        # --- 静态字段合并：将姓名/出身等静态信息合并为「人物背景」 ---
+        # 每次都检查，确保旧会话或遗漏情况也能补救
+        if session.get("current_life"):
             _consolidate_static_fields(session)
 
         # --- 继承系统：试炼开始时应用先天奖励 ---

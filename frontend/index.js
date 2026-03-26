@@ -836,6 +836,8 @@ function renderCharacterStatus() {
 
     // --- 定义渲染顺序和特殊处理 ---
     const SKIP_KEYS = ['人物关系', '功法'];
+    // 判断是否应该跳过：精确匹配或前缀匹配（如 "人物关系.柳如烟"）
+    const shouldSkip = (k) => SKIP_KEYS.some(sk => k === sk || k.startsWith(sk + '.'));
     // 临时事件字段前缀：以 "~" 开头的字段视为临时事件，其余全部为持久字段
     const TEMP_FIELD_PREFIX = '~';
     const PRIORITY_KEYS = ['人物背景', '生命值', '灵石', '属性', '物品', '状态效果', '位置', '故事事件'];
@@ -860,11 +862,11 @@ function renderCharacterStatus() {
         if (allKeys.includes(pk)) orderedKeys.push(pk);
     }
     for (const k of allKeys) {
-        if (!orderedKeys.includes(k) && !SKIP_KEYS.includes(k)) orderedKeys.push(k);
+        if (!orderedKeys.includes(k) && !shouldSkip(k)) orderedKeys.push(k);
     }
 
     orderedKeys.forEach((key) => {
-        if (SKIP_KEYS.includes(key)) return;
+        if (shouldSkip(key)) return;
         const value = current_life[key];
 
         // 英文key自动翻译为中文显示名
