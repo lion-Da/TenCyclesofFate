@@ -1,0 +1,424 @@
+{
+  "scenario_id": "doupo",
+  "description": "斗破苍穹简化剧情时间线 — 用于GM叙事参考、机缘副本触发、NPC演化指引",
+
+  "protagonist_growth": [
+    {"phase": "废物期",   "realm": "斗之气三段",  "chapter": "1-38"},
+    {"phase": "崛起期",   "realm": "斗之气八段",  "chapter": "39-65"},
+    {"phase": "入道期",   "realm": "斗者",        "chapter": "65-158"},
+    {"phase": "历练期",   "realm": "斗师",        "chapter": "158-329"},
+    {"phase": "扬名期",   "realm": "大斗师",      "chapter": "329-450"},
+    {"phase": "蜕变期",   "realm": "斗灵",        "chapter": "450-600"},
+    {"phase": "帝国期",   "realm": "斗王",        "chapter": "600-850"},
+    {"phase": "中州期",   "realm": "斗皇",        "chapter": "850-1100"},
+    {"phase": "争锋期",   "realm": "斗宗",        "chapter": "1100-1300"},
+    {"phase": "巅峰期",   "realm": "斗尊",        "chapter": "1300-1500"},
+    {"phase": "终局",     "realm": "半圣→斗圣→斗帝", "chapter": "1500-1646"}
+  ],
+
+  "arcs": [
+    {
+      "id": "arc_01",
+      "name": "萧家沉沦",
+      "chapter_range": "1-65",
+      "location": "乌坦城·萧家",
+      "realm_range": "斗之气三段 → 斗者",
+      "events": [
+        {
+          "name": "天才陨落",
+          "who": ["萧炎"],
+          "where": "萧家·斗技测验场",
+          "what": "萧炎被测出斗之气三段，沦为全城笑柄",
+          "why": "三年前斗气旋一夜消失（实为药老寄居戒指吸收所致）",
+          "result": "从天才神坛跌落，被族人嘲讽为废物",
+          "opportunity": false
+        },
+        {
+          "name": "退婚之辱",
+          "who": ["萧炎", "纳兰嫣然", "萧战", "葛叶"],
+          "where": "萧家·大殿",
+          "what": "纳兰嫣然遣云岚宗长老上门退婚，萧炎怒写休书回敬",
+          "why": "纳兰嫣然入云岚宗后天赋出众，不愿嫁给废物",
+          "result": "立下三年之约——三年后萧炎登云岚宗一战",
+          "opportunity": true,
+          "opportunity_desc": "三年之约·命运转折",
+          "opportunity_type": "剧情触发"
+        },
+        {
+          "name": "药老现身",
+          "who": ["萧炎", "药老"],
+          "where": "萧炎房间",
+          "what": "戒指中的神秘老者药尘主动现身，收萧炎为徒",
+          "why": "药老观察萧炎多年，认为其心性坚韧足以托付焚决传承",
+          "result": "获得恩师指导，人生彻底转折",
+          "opportunity": true,
+          "opportunity_desc": "奇遇·神秘老者",
+          "opportunity_type": "传承"
+        },
+        {
+          "name": "修炼焚决",
+          "who": ["萧炎", "药老"],
+          "where": "萧家后山",
+          "what": "药老传授焚决——黄阶低级但可通过吞噬异火无限进化的功法",
+          "why": "焚决是药老一生心血，初始虽弱但潜力冠绝天下",
+          "result": "萧炎选择焚决而非安全的地阶功法，走上异火之路",
+          "opportunity": false
+        },
+        {
+          "name": "成人仪式·一鸣惊人",
+          "who": ["萧炎", "萧宁", "萧媚", "萧薰儿"],
+          "where": "萧家·演武场",
+          "what": "成人仪式测验，萧炎展现斗之气八段实力，击败萧宁",
+          "why": "一年苦修加药老指导，实力飞速恢复",
+          "result": "全族震惊，废物之名不攻自破",
+          "opportunity": true,
+          "opportunity_desc": "族中比武·扬名",
+          "opportunity_type": "战斗副本"
+        }
+      ],
+      "npc_states": {
+        "萧薰儿": {"realm": "一星斗者", "location": "萧家", "attitude": "暗中关注萧炎"},
+        "萧战": {"realm": "五星大斗师", "location": "萧家", "attitude": "为儿子忧心"},
+        "萧媚": {"realm": "七段斗之气", "location": "萧家", "attitude": "轻视→震惊"},
+        "萧宁": {"realm": "八段斗之气", "location": "萧家", "attitude": "嫉妒敌视"},
+        "纳兰嫣然": {"realm": "三星斗者", "location": "云岚宗", "attitude": "退婚后不再关注"},
+        "药老": {"realm": "灵魂体", "location": "萧炎戒指中", "attitude": "悉心教导"}
+      }
+    },
+    {
+      "id": "arc_02",
+      "name": "魔兽山脉历练",
+      "chapter_range": "86-158",
+      "location": "魔兽山脉 → 塔戈尔沙漠边缘",
+      "realm_range": "斗者 → 斗师",
+      "events": [
+        {
+          "name": "横穿魔兽山脉",
+          "who": ["萧炎", "药老"],
+          "where": "魔兽山脉",
+          "what": "离开萧家，独自穿越危险的魔兽山脉",
+          "why": "药老计划让萧炎在实战中晋级斗师",
+          "result": "连续战斗升级，从斗者快速攀升",
+          "opportunity": true,
+          "opportunity_desc": "魔兽山脉·历练",
+          "opportunity_type": "探索副本"
+        },
+        {
+          "name": "初遇小医仙",
+          "who": ["萧炎", "小医仙"],
+          "where": "青山镇",
+          "what": "遇到拥有厄难毒体的神秘少女",
+          "why": "命运交织",
+          "result": "结识日后重要伙伴",
+          "opportunity": true,
+          "opportunity_desc": "奇遇·毒体少女",
+          "opportunity_type": "剧情触发"
+        },
+        {
+          "name": "遭遇紫晶翼狮王",
+          "who": ["萧炎", "云韵"],
+          "where": "魔兽山脉深处",
+          "what": "萧炎目睹云韵与六阶魔兽紫晶翼狮王战斗，云韵受伤",
+          "why": "云韵争夺紫灵晶",
+          "result": "萧炎救治受伤的云韵，二人同居山洞",
+          "opportunity": true,
+          "opportunity_desc": "奇遇·受伤女宗主",
+          "opportunity_type": "剧情触发"
+        },
+        {
+          "name": "晋阶斗师",
+          "who": ["萧炎"],
+          "where": "魔兽山脉出口",
+          "what": "离家约一年后成功突破为斗师",
+          "why": "持续战斗积累+药老指导",
+          "result": "正式踏入强者之列",
+          "opportunity": false
+        }
+      ],
+      "npc_states": {
+        "云韵": {"realm": "斗皇（封印至斗灵）", "location": "魔兽山脉→养伤", "attitude": "对萧炎产生好感"},
+        "小医仙": {"realm": "斗者", "location": "青山镇", "attitude": "与萧炎短暂交集"},
+        "萧薰儿": {"realm": "斗者→大斗师", "location": "迦南学院", "attitude": "思念萧炎"},
+        "纳兰嫣然": {"realm": "大斗师", "location": "云岚宗", "attitude": "刻苦修炼备战三年之约"}
+      }
+    },
+    {
+      "id": "arc_03",
+      "name": "异火争夺·帝都扬名",
+      "chapter_range": "159-329",
+      "location": "黑岚城 → 塔戈尔大沙漠 → 加玛帝都",
+      "realm_range": "斗师 → 大斗师",
+      "events": [
+        {
+          "name": "海波东解封",
+          "who": ["萧炎", "海波东"],
+          "where": "石漠城",
+          "what": "萧炎以炼药术为冰皇海波东解除蛇之封印",
+          "why": "海波东被美杜莎封印多年，萧炎借此交换异火情报",
+          "result": "结盟冰皇，获得青莲地心火线索",
+          "opportunity": true,
+          "opportunity_desc": "机缘·冰皇之约",
+          "opportunity_type": "副本"
+        },
+        {
+          "name": "争夺青莲地心火",
+          "who": ["萧炎", "美杜莎", "海波东"],
+          "where": "塔戈尔大沙漠深处",
+          "what": "趁美杜莎蜕变为七彩吞天蟒之际，萧炎抢夺青莲地心火",
+          "why": "异火是焚决进化的关键，美杜莎也需要异火辅助蜕变",
+          "result": "成功收服青莲地心火（异火榜第19），焚决进化至玄阶",
+          "opportunity": true,
+          "opportunity_desc": "异火·青莲地心火",
+          "opportunity_type": "争夺副本"
+        },
+        {
+          "name": "炼药师大会夺冠",
+          "who": ["萧炎", "古河", "纳兰桀"],
+          "where": "加玛帝都",
+          "what": "萧炎化名'岩枭'参加大会，击败丹王古河获冠军",
+          "why": "积累名望、为纳兰桀驱毒获取资源",
+          "result": "名震帝都，三品炼药师之名传遍加玛帝国",
+          "opportunity": true,
+          "opportunity_desc": "炼药大会·夺冠",
+          "opportunity_type": "竞赛副本"
+        }
+      ],
+      "npc_states": {
+        "美杜莎": {"realm": "斗皇→蜕变中", "location": "塔戈尔大沙漠", "attitude": "对萧炎极度仇恨→复杂"},
+        "海波东": {"realm": "斗皇（解封后）", "location": "石漠城→帝都", "attitude": "感恩萧炎"},
+        "古河": {"realm": "斗灵/六品炼药师", "location": "帝都", "attitude": "被萧炎击败后心生佩服"},
+        "纳兰嫣然": {"realm": "大斗师", "location": "云岚宗/帝都", "attitude": "隐约感到不安"}
+      }
+    },
+    {
+      "id": "arc_04",
+      "name": "三年之约",
+      "chapter_range": "330-354",
+      "location": "云岚宗",
+      "realm_range": "大斗师",
+      "events": [
+        {
+          "name": "登宗之战",
+          "who": ["萧炎", "纳兰嫣然"],
+          "where": "云岚宗·比武场",
+          "what": "三年期满，萧炎登上云岚宗，千人前与纳兰嫣然决战",
+          "why": "兑现三年前的诺言",
+          "result": "萧炎以佛怒火莲+异火优势击败纳兰嫣然",
+          "opportunity": true,
+          "opportunity_desc": "三年之约·一战成名",
+          "opportunity_type": "剧情战斗"
+        },
+        {
+          "name": "云山现身",
+          "who": ["萧炎", "云山"],
+          "where": "云岚宗",
+          "what": "前宗主云山（斗宗）出手干预，萧炎无力抗衡",
+          "why": "云岚宗不甘失败",
+          "result": "萧炎被迫退走，但三年之约已胜",
+          "opportunity": false
+        }
+      ],
+      "npc_states": {
+        "纳兰嫣然": {"realm": "大斗师巅峰", "location": "云岚宗", "attitude": "战败后开始反思"},
+        "云韵": {"realm": "斗皇", "location": "云岚宗", "attitude": "暗中关注战局"},
+        "云山": {"realm": "斗宗", "location": "云岚宗", "attitude": "出手压制萧炎"}
+      }
+    },
+    {
+      "id": "arc_05",
+      "name": "迦南学院",
+      "chapter_range": "380-600",
+      "location": "迦南学院（外院→内院）→ 天焚炼气塔",
+      "realm_range": "大斗师 → 斗灵 → 斗王",
+      "events": [
+        {
+          "name": "入学与重逢",
+          "who": ["萧炎", "萧薰儿"],
+          "where": "迦南学院",
+          "what": "通过选拔进入迦南学院，与萧薰儿久别重逢",
+          "why": "药老指引萧炎来此，真正目的是底层封印的陨落心炎",
+          "result": "在学院中继续修炼成长",
+          "opportunity": true,
+          "opportunity_desc": "奇遇·迦南学院",
+          "opportunity_type": "剧情触发"
+        },
+        {
+          "name": "吞噬陨落心炎",
+          "who": ["萧炎"],
+          "where": "天焚炼气塔底层",
+          "what": "萧炎深入炼气塔底层，吞噬异火榜第14的陨落心炎",
+          "why": "这是药老让萧炎来迦南学院的真正目的",
+          "result": "焚决再次大幅进化，实力暴涨至斗灵级",
+          "opportunity": true,
+          "opportunity_desc": "异火·陨落心炎",
+          "opportunity_type": "争夺副本"
+        }
+      ],
+      "npc_states": {
+        "萧薰儿": {"realm": "大斗师→斗灵", "location": "迦南学院", "attitude": "重逢欣喜"},
+        "萧战": {"realm": "斗王", "location": "萧家（后被攻陷）", "attitude": "苦撑萧家"}
+      }
+    },
+    {
+      "id": "arc_06",
+      "name": "覆灭云岚宗",
+      "chapter_range": "700-1000",
+      "location": "黑角域 → 加玛帝国 → 云岚宗",
+      "realm_range": "斗王 → 斗皇",
+      "events": [
+        {
+          "name": "药老被魂殿抓走",
+          "who": ["药老", "魂殿"],
+          "where": "加玛帝国",
+          "what": "魂殿强者出手擒拿药老灵魂",
+          "why": "魂殿追捕灵魂体用于祭炼",
+          "result": "萧炎失去最大依靠，立誓营救恩师",
+          "opportunity": false
+        },
+        {
+          "name": "覆灭云岚宗",
+          "who": ["萧炎", "云山", "云韵"],
+          "where": "云岚宗",
+          "what": "萧炎率众攻上云岚宗，大战云山（已暗中投靠魂殿获得斗宗之力）",
+          "why": "为萧家报仇、清除魂殿爪牙",
+          "result": "云岚宗覆灭，云山被杀。云韵求情保留部分无辜弟子",
+          "opportunity": true,
+          "opportunity_desc": "大战·覆灭云岚宗",
+          "opportunity_type": "剧情战斗"
+        }
+      ],
+      "npc_states": {
+        "云韵": {"realm": "斗皇", "location": "云岚宗→离开加玛帝国", "attitude": "对萧炎情感加深"},
+        "云山": {"realm": "斗宗（魂殿增幅）", "location": "云岚宗", "attitude": "已被杀"},
+        "美杜莎": {"realm": "斗宗", "location": "加玛帝国", "attitude": "与萧炎关系缓和"},
+        "小医仙": {"realm": "斗皇", "location": "黑角域→加玛帝国", "attitude": "追随萧炎"}
+      }
+    },
+    {
+      "id": "arc_07",
+      "name": "闯荡中州",
+      "chapter_range": "1000-1200",
+      "location": "中州大陆·天北城 → 圣丹城",
+      "realm_range": "斗皇 → 斗宗",
+      "events": [
+        {
+          "name": "踏入中州",
+          "who": ["萧炎"],
+          "where": "中州大陆",
+          "what": "从加玛帝国前往中州——斗气大陆的真正中心",
+          "why": "为营救药老、寻找更强异火",
+          "result": "进入更广阔更危险的世界",
+          "opportunity": true,
+          "opportunity_desc": "新大陆·中州",
+          "opportunity_type": "探索"
+        },
+        {
+          "name": "丹会夺冠",
+          "who": ["萧炎"],
+          "where": "圣丹城",
+          "what": "参加中州丹会，以高超炼药术夺冠",
+          "why": "积累人脉与声望",
+          "result": "炼药术名震中州，获得丹塔认可",
+          "opportunity": true,
+          "opportunity_desc": "中州丹会·竞技",
+          "opportunity_type": "竞赛副本"
+        }
+      ],
+      "npc_states": {
+        "萧薰儿": {"realm": "斗王→斗皇", "location": "古族", "attitude": "等待萧炎"},
+        "药老": {"realm": "灵魂被囚", "location": "魂殿", "attitude": "等待营救"}
+      }
+    },
+    {
+      "id": "arc_08",
+      "name": "古族与营救",
+      "chapter_range": "1200-1500",
+      "location": "古族 → 星陨阁 → 魂殿",
+      "realm_range": "斗宗 → 斗尊 → 半圣",
+      "events": [
+        {
+          "name": "前往古族",
+          "who": ["萧炎", "萧薰儿", "古元"],
+          "where": "古界",
+          "what": "萧炎前往古族见薰儿，接受古族试炼",
+          "why": "薰儿身世揭晓为古族血脉传人",
+          "result": "通过试炼获得认可",
+          "opportunity": true,
+          "opportunity_desc": "古族试炼",
+          "opportunity_type": "试炼副本"
+        },
+        {
+          "name": "建立天府联盟",
+          "who": ["萧炎", "药老"],
+          "where": "中州",
+          "what": "整合星陨阁等势力建立天府联盟，营救药老恢复肉身",
+          "why": "为对抗魂殿做准备",
+          "result": "药老恢复肉身，天府联盟成为可与魂殿抗衡的势力",
+          "opportunity": true,
+          "opportunity_desc": "天府联盟·崛起",
+          "opportunity_type": "势力建设"
+        }
+      ],
+      "npc_states": {
+        "古元": {"realm": "斗圣巅峰", "location": "古族", "attitude": "认可萧炎"},
+        "药老": {"realm": "斗尊（恢复肉身后）", "location": "天府联盟", "attitude": "重获自由"},
+        "魂天帝": {"realm": "半步斗帝", "location": "魂族总部", "attitude": "暗中布局"}
+      }
+    },
+    {
+      "id": "arc_09",
+      "name": "最终决战·炎帝传说",
+      "chapter_range": "1500-1646",
+      "location": "古帝洞府 → 中州各地 → 最终战场",
+      "realm_range": "斗圣 → 斗帝",
+      "events": [
+        {
+          "name": "古帝洞府争夺",
+          "who": ["萧炎", "魂天帝", "古元", "各族强者"],
+          "where": "古帝洞府",
+          "what": "陀舍古帝洞府开启，各方势力争夺帝品雏丹和源气",
+          "why": "源气是晋入斗帝的唯一途径",
+          "result": "魂天帝率先获得部分资源",
+          "opportunity": true,
+          "opportunity_desc": "古帝洞府·终极争夺",
+          "opportunity_type": "最终副本"
+        },
+        {
+          "name": "魂天帝晋入斗帝",
+          "who": ["魂天帝"],
+          "where": "中州",
+          "what": "魂天帝吞噬万物之力率先突破斗帝境界",
+          "why": "千年布局终于实现",
+          "result": "中州浩劫——斗帝之力恐怖无比，万物面临毁灭",
+          "opportunity": false
+        },
+        {
+          "name": "萧炎晋入斗帝·双帝之战",
+          "who": ["萧炎", "魂天帝"],
+          "where": "最终战场",
+          "what": "萧炎获得古帝传承+掌控异火榜第一，成功晋入斗帝，与魂天帝展开双帝大战",
+          "why": "为拯救斗气大陆、保护亲人",
+          "result": "击败魂天帝，拯救大陆",
+          "opportunity": true,
+          "opportunity_desc": "双帝之战·最终决战",
+          "opportunity_type": "剧情战斗"
+        },
+        {
+          "name": "五帝破空",
+          "who": ["萧炎", "萧薰儿", "美杜莎", "古元", "烛坤"],
+          "where": "斗气大陆上空",
+          "what": "数十年后，五位斗帝级强者破开空间壁障前往新世界",
+          "why": "大陆已无法承载斗帝修炼",
+          "result": "结束，也是开始——新的旅程",
+          "opportunity": false
+        }
+      ],
+      "npc_states": {
+        "萧薰儿": {"realm": "斗帝", "location": "萧炎身旁", "attitude": "终成道侣"},
+        "美杜莎": {"realm": "斗帝", "location": "萧炎身旁", "attitude": "终成道侣"},
+        "药老": {"realm": "斗圣", "location": "天府联盟", "attitude": "欣慰看着弟子超越自己"},
+        "魂天帝": {"realm": "斗帝（已败）", "location": "消亡", "attitude": "——"}
+      }
+    }
+  ]
+}

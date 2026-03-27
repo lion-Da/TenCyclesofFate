@@ -2148,8 +2148,11 @@ async def _process_player_action_async(user_info: dict, action: str):
 
         # ── Extract companion mode and difficulty from action ──
         # Frontend sends "开始试炼:独行:凡人修仙" or "开始试炼:同行:气运之子" etc.
+        # Extended: "开始试炼:独行:凡人修仙:doupo:萧炎" (with scenario and character name)
         companion_mode = "同行（生成初始伙伴）"  # default
         difficulty_name = DEFAULT_DIFFICULTY
+        scenario_id = "freestyle"
+        player_character_name = ""
         if is_starting_trial and ":" in action:
             parts = action.split(":")
             if len(parts) >= 2:
@@ -2160,22 +2163,76 @@ async def _process_player_action_async(user_info: dict, action: str):
                 diff_part = parts[2].strip()
                 if diff_part in DIFFICULTY_PRESETS:
                     difficulty_name = diff_part
-            # Store difficulty in session for roll/endgame use
+            # 剧本模式解析: parts[3]=scenario_id, parts[4]=character_name
+            if len(parts) >= 4:
+                scenario_part = parts[3].strip()
+                if scenario_part and scenario_part != "freestyle":
+                    scenario_id = scenario_part
+            if len(parts) >= 5:
+                player_character_name = parts[4].strip()
+            # Store in session
             session["difficulty"] = difficulty_name
-            logger.info(f"Trial start for {player_id}: companion={companion_mode}, difficulty={difficulty_name}")
+            session["scenario_id"] = scenario_id
+            if player_character_name:
+                session["player_character_name"] = player_character_name
+            # 剧本模式强制同行（人物关系由剧本预设决定）
+            if scenario_id != "freestyle":
+                companion_mode = "剧本模式（人物关系由原著预设）"
+            logger.info(
+                f"Trial start for {player_id}: companion={companion_mode}, "
+                f"difficulty={difficulty_name}, scenario={scenario_id}, "
+                f"character={player_character_name or '(random)'}"
+            )
+
+        # ── 剧本模式：注入 scenario-specific system prompt ──
+        effective_scenario = session.get("scenario_id", "freestyle")
+        if is_starting_trial and effective_scenario != "freestyle":
+            from .scenarios import build_scenario_system_prompt, build_scenario_start_prompt
+            scenario_supplement = build_scenario_system_prompt(effective_scenario)
+            if scenario_supplement:
+                # 在 system prompt 后追加剧本世界观
+                combined_system_prompt = GAME_MASTER_SYSTEM_PROMPT + "\n\n" + scenario_supplement
+                session["internal_history"] = [
+                    {"role": "system", "content": combined_system_prompt}
+                ]
+                logger.info(f"剧本模式: 已注入 {effective_scenario} 世界观到 system prompt")
 
         session_copy = _build_compact_state_for_ai(session)
-        prompt_for_ai = (
-            START_GAME_PROMPT.format(companion_mode=companion_mode)
-            if is_first_ever_trial_of_day
-            else START_TRIAL_PROMPT.format(
-                opportunities_remaining=session["opportunities_remaining"],
-                opportunities_remaining_minus_1=session["opportunities_remaining"] - 1,
+
+        # ── 选择开局 prompt（支持剧本模式） ──
+        if is_starting_trial and effective_scenario != "freestyle":
+            from .scenarios import build_scenario_start_prompt
+            scenario_prompt = build_scenario_start_prompt(
+                effective_scenario,
+                player_name=session.get("player_character_name", ""),
                 companion_mode=companion_mode,
             )
-            if is_starting_trial
-            else _build_action_prompt(session_copy, action)
-        )
+            if scenario_prompt:
+                prompt_for_ai = (
+                    scenario_prompt
+                    .replace("{opportunities_remaining}", str(session["opportunities_remaining"]))
+                    .replace("{opportunities_remaining_minus_1}", str(session["opportunities_remaining"] - 1))
+                    .replace("{companion_mode}", companion_mode)
+                )
+            else:
+                # 剧本数据加载失败，回退到默认
+                prompt_for_ai = START_TRIAL_PROMPT.format(
+                    opportunities_remaining=session["opportunities_remaining"],
+                    opportunities_remaining_minus_1=session["opportunities_remaining"] - 1,
+                    companion_mode=companion_mode,
+                )
+        else:
+            prompt_for_ai = (
+                START_GAME_PROMPT.format(companion_mode=companion_mode)
+                if is_first_ever_trial_of_day
+                else START_TRIAL_PROMPT.format(
+                    opportunities_remaining=session["opportunities_remaining"],
+                    opportunities_remaining_minus_1=session["opportunities_remaining"] - 1,
+                    companion_mode=companion_mode,
+                )
+                if is_starting_trial
+                else _build_action_prompt(session_copy, action)
+            )
 
         # Update histories with user action first
         # ── 重要：不要把难度名称（如"气运之父""气运之子"）泄露给 AI，
@@ -2297,6 +2354,22 @@ async def _process_player_action_async(user_info: dict, action: str):
                 f"\n\n【人缘变动】\n\n{social_text}"
             )
 
+        # --- NPC 时间演化：每隔若干回合 NPC 自然成长 ---
+        if session.get("current_life"):
+            round_count = session.get("_round_count", 0) + 1
+            session["_round_count"] = round_count
+            try:
+                evolution_msgs = social_system.evolve_npcs_over_time(
+                    session["current_life"], round_count
+                )
+                if evolution_msgs:
+                    evo_text = "\n".join(f"· {m}" for m in evolution_msgs)
+                    session["display_history"].append(
+                        f"\n\n【江湖传闻】\n{evo_text}"
+                    )
+            except Exception as e:
+                logger.warning(f"NPC时间演化异常: {e}")
+
         # --- 故事事件精简：每次状态更新后自动精简 ---
         if session.get("current_life"):
             _prune_story_events(session["current_life"])
@@ -2321,6 +2394,46 @@ async def _process_player_action_async(user_info: dict, action: str):
                     f"Difficulty '{preset['label']}' applied for {player_id}: "
                     f"attr_min={preset.get('attr_min')}, attr_max={preset.get('attr_max')}"
                 )
+
+        # --- 剧本模式：程序化注入预设角色的人物关系和物品（含好感度） ---
+        if is_starting_trial and session.get("current_life") and effective_scenario != "freestyle":
+            try:
+                from .scenarios import get_character_preset
+                char_preset = get_character_preset(
+                    effective_scenario,
+                    session.get("player_character_name", ""),
+                )
+                if char_preset:
+                    cl = session["current_life"]
+                    # 注入人物关系
+                    if "人物关系" in char_preset:
+                        if "人物关系" not in cl or not isinstance(cl.get("人物关系"), dict):
+                            cl["人物关系"] = {}
+                        preset_relations = char_preset["人物关系"]
+                        for npc_name, npc_data in preset_relations.items():
+                            if isinstance(npc_data, dict):
+                                cl["人物关系"][npc_name] = dict(npc_data)
+                        logger.info(
+                            f"剧本预设人物关系注入: {list(preset_relations.keys())}"
+                        )
+                    # 注入预设物品（确保关键道具如黑色戒指必定存在）
+                    if "物品" in char_preset:
+                        if "物品" not in cl or not isinstance(cl.get("物品"), list):
+                            cl["物品"] = []
+                        existing_names = {
+                            item.get("名称") if isinstance(item, dict) else str(item)
+                            for item in cl["物品"]
+                        }
+                        for item in char_preset["物品"]:
+                            item_name = item.get("名称") if isinstance(item, dict) else str(item)
+                            if item_name not in existing_names:
+                                cl["物品"].append(dict(item) if isinstance(item, dict) else item)
+                        logger.info(
+                            f"剧本预设物品注入: "
+                            f"{[i.get('名称', i) if isinstance(i, dict) else i for i in char_preset['物品']]}"
+                        )
+            except Exception as e:
+                logger.warning(f"剧本预设注入失败: {e}")
 
         # --- 静态字段合并：将姓名/出身等静态信息合并为「人物背景」 ---
         # 每次都检查，确保旧会话或遗漏情况也能补救

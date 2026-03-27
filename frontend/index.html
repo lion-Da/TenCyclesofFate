@@ -144,6 +144,36 @@
             <div id="companion-panel">
                 <div class="companion-title">踏入轮回之前……</div>
 
+                <!-- Scenario Selection -->
+                <div class="config-section">
+                    <div class="config-section-title">世界剧本</div>
+                    <div class="scenario-choices" id="scenario-choices">
+                        <button class="scenario-btn selected" data-scenario="freestyle">
+                            <span class="btn-icon">🌙</span>
+                            <span class="btn-label">浮生修仙</span>
+                            <span class="btn-hint">经典休闲修仙，随机世界</span>
+                        </button>
+                        <button class="scenario-btn" data-scenario="doupo">
+                            <span class="btn-icon">🔥</span>
+                            <span class="btn-label">斗破苍穹</span>
+                            <span class="btn-hint">斗气大陆，异火争夺</span>
+                        </button>
+                    </div>
+                    <!-- Character Name Input (for novel scenarios) -->
+                    <div id="scenario-character-input" class="hidden" style="margin-top:10px;">
+                        <div class="config-section-title" style="font-size:0.85rem;">选择魂穿角色</div>
+                        <div id="scenario-character-grid" class="scenario-char-grid">
+                            <!-- 动态填充快捷角色按钮 -->
+                        </div>
+                        <div style="margin-top:8px; display:flex; align-items:center; gap:6px;">
+                            <input type="text" id="scenario-character-name" 
+                                   placeholder="或手动输入角色名…" 
+                                   class="scenario-name-input" />
+                        </div>
+                        <div class="scenario-name-hint">💡 选择上方角色可直接魂穿原作人物；手动输入原作中其他角色名也可魂穿；输入原创名字则在该世界随机生成</div>
+                    </div>
+                </div>
+
                 <!-- Difficulty Selection -->
                 <div class="config-section">
                     <div class="config-section-title">天道难度</div>
@@ -171,8 +201,8 @@
                     </div>
                 </div>
 
-                <!-- Companion Selection -->
-                <div class="config-section">
+                <!-- Companion Selection (hidden in scenario mode) -->
+                <div class="config-section" id="companion-section">
                     <div class="config-section-title">同行之缘</div>
                     <div class="companion-desc">独行者，孤剑破万敌；结伴者，同舟共济渡劫波。</div>
                     <div class="companion-choices">
@@ -187,6 +217,14 @@
                             <span class="btn-hint">生成1-3位初始伙伴，开启好感度系统</span>
                         </button>
                     </div>
+                </div>
+                <!-- Scenario mode: direct start button (no companion choice) -->
+                <div id="scenario-start-section" class="config-section hidden">
+                    <button id="btn-scenario-start" class="companion-btn party" style="width:100%;">
+                        <span class="btn-icon">⚡</span>
+                        <span class="btn-label">魂穿！</span>
+                        <span class="btn-hint">剧本模式将根据原著自动生成人物关系</span>
+                    </button>
                 </div>
             </div>
         </div>

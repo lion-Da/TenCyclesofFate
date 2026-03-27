@@ -1533,20 +1533,120 @@ function init() {
         });
     });
 
+    // Scenario selection buttons
+    document.querySelectorAll('.scenario-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            document.querySelectorAll('.scenario-btn').forEach(b => b.classList.remove('selected'));
+            btn.classList.add('selected');
+            const scenarioId = btn.dataset.scenario;
+            const charSection = document.getElementById('scenario-character-input');
+            const charGrid = document.getElementById('scenario-character-grid');
+            const charNameInput = document.getElementById('scenario-character-name');
+            const companionSection = document.getElementById('companion-section');
+            const scenarioStartSection = document.getElementById('scenario-start-section');
+            const isNovel = scenarioId !== 'freestyle';
+            
+            // 剧本模式：隐藏同行选择，显示魂穿按钮；休闲模式反之
+            if (companionSection) companionSection.classList.toggle('hidden', isNovel);
+            if (scenarioStartSection) scenarioStartSection.classList.toggle('hidden', !isNovel);
+            
+            if (!isNovel) {
+                // 休闲模式不需要角色选择
+                if (charSection) charSection.classList.add('hidden');
+                if (charNameInput) charNameInput.value = '';
+                return;
+            }
+            
+            // 显示角色选择区
+            if (charSection) charSection.classList.remove('hidden');
+            if (charNameInput) charNameInput.value = '';
+            
+            // 获取该剧本的可选角色并渲染快捷按钮
+            if (charGrid) {
+                charGrid.innerHTML = '<span style="color:#888;font-size:0.8rem;">加载中…</span>';
+                try {
+                    const resp = await fetch(`/api/scenarios/${scenarioId}/characters`);
+                    const result = await resp.json();
+                    // 兼容新格式 {characters, allow_custom} 和旧格式 [...]
+                    const characters = Array.isArray(result) ? result : (result.characters || []);
+                    const allowCustom = Array.isArray(result) ? true : (result.allow_custom !== false);
+                    charGrid.innerHTML = '';
+                    characters.forEach(ch => {
+                        const btn = document.createElement('button');
+                        btn.className = 'scenario-char-btn';
+                        btn.innerHTML = `<span class="char-icon">${ch.icon || '👤'}</span><span class="char-name">${ch.name}</span><span class="char-desc">${ch.desc || ''}</span>`;
+                        btn.addEventListener('click', () => {
+                            // 取消之前的选中
+                            charGrid.querySelectorAll('.scenario-char-btn').forEach(b => b.classList.remove('selected'));
+                            btn.classList.add('selected');
+                            // 填入名字
+                            if (charNameInput) charNameInput.value = ch.name;
+                        });
+                        charGrid.appendChild(btn);
+                    });
+                    // 如果不允许自定义角色，隐藏手动输入框和提示
+                    const customInputWrapper = charNameInput?.closest('div');
+                    const customHint = document.querySelector('.scenario-name-hint');
+                    if (!allowCustom) {
+                        if (customInputWrapper) customInputWrapper.style.display = 'none';
+                        if (customHint) customHint.style.display = 'none';
+                        // 只有一个角色时自动选中
+                        if (characters.length === 1) {
+                            const firstBtn = charGrid.querySelector('.scenario-char-btn');
+                            if (firstBtn) firstBtn.click();
+                        }
+                    } else {
+                        if (customInputWrapper) customInputWrapper.style.display = '';
+                        if (customHint) customHint.style.display = '';
+                    }
+                } catch (e) {
+                    charGrid.innerHTML = '<span style="color:#a00;font-size:0.8rem;">加载失败</span>';
+                }
+            }
+        });
+    });
+
     // Helper: get currently selected difficulty
     function getSelectedDifficulty() {
         const sel = document.querySelector('.difficulty-btn.selected');
         return sel ? sel.dataset.difficulty : '凡人修仙';
     }
 
-    // Companion choice buttons (now include difficulty)
+    // Helper: get selected scenario and character name
+    function getSelectedScenario() {
+        const sel = document.querySelector('.scenario-btn.selected');
+        return sel ? sel.dataset.scenario : 'freestyle';
+    }
+    function getScenarioCharacterName() {
+        const input = document.getElementById('scenario-character-name');
+        return input ? input.value.trim() : '';
+    }
+
+    // Build the full action string with scenario info
+    function buildStartAction(companionMode) {
+        const difficulty = getSelectedDifficulty();
+        const scenario = getSelectedScenario();
+        const charName = getScenarioCharacterName();
+        let action = `开始试炼:${companionMode}:${difficulty}`;
+        if (scenario !== 'freestyle') {
+            action += `:${scenario}:${charName}`;
+        }
+        return action;
+    }
+
+    // Companion choice buttons (freestyle mode)
     document.getElementById('btn-companion-solo')?.addEventListener('click', () => {
         document.getElementById('companion-dialog').classList.add('hidden');
-        handleAction(`开始试炼:独行:${getSelectedDifficulty()}`);
+        handleAction(buildStartAction('独行'));
     });
     document.getElementById('btn-companion-party')?.addEventListener('click', () => {
         document.getElementById('companion-dialog').classList.add('hidden');
-        handleAction(`开始试炼:同行:${getSelectedDifficulty()}`);
+        handleAction(buildStartAction('同行'));
+    });
+    // Scenario mode start button (no companion choice — forced by scenario)
+    document.getElementById('btn-scenario-start')?.addEventListener('click', () => {
+        document.getElementById('companion-dialog').classList.add('hidden');
+        handleAction(buildStartAction('剧本'));
     });
     
     // 继承系统按钮

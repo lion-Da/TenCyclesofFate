@@ -641,7 +641,65 @@ NPC_VISIBILITY_THRESHOLDS = {
 }
 
 
-def get_npc_visible_data(npc: dict) -> dict:
+def evolve_npcs_over_time(current_life: dict, rounds_passed: int = 1) -> list[str]:
+    """
+    NPC 时间演化：随着游戏回合推进，NPC 也会自然成长。
+    
+    每隔若干回合，NPC 有概率：
+    - 境界小幅提升
+    - 好感度自然变化（基于关系阶段）
+    - 触发自主行为事件
+    
+    Args:
+        current_life: 玩家的 current_life
+        rounds_passed: 经过的回合数
+    
+    Returns:
+        演化事件描述列表
+    """
+    npcs = current_life.get("人物关系")
+    if not npcs or not isinstance(npcs, dict):
+        return []
+    
+    messages = []
+    
+    for npc_name, npc in npcs.items():
+        if not isinstance(npc, dict):
+            continue
+        
+        score = _safe_int(npc.get("好感度", 0), 0)
+        realm = npc.get("境界")
+        
+        # 每5回合有概率演化
+        if rounds_passed % 5 != 0:
+            continue
+        
+        # NPC 境界演化：小概率提升
+        if realm and isinstance(realm, str) and random.random() < 0.15:
+            # 记录演化事件（具体境界变化由 AI 在下次叙事中描述）
+            npc["_pending_evolution"] = True
+            messages.append(
+                f"{npc_name}近来修炼有所突破，似有精进之象。"
+            )
+        
+        # NPC 好感度自然漂移（基于关系阶段）
+        if score >= 60:
+            # 高好感 NPC 会自然微增
+            drift = random.randint(0, 1)
+        elif score >= 20:
+            # 中好感 NPC 保持稳定
+            drift = 0
+        elif score < -20:
+            # 低好感 NPC 可能进一步恶化
+            drift = random.randint(-1, 0)
+        else:
+            drift = 0
+        
+        if drift != 0:
+            new_score = max(MIN_AFFINITY, min(MAX_AFFINITY, score + drift))
+            npc["好感度"] = new_score
+    
+    return messages
     """
     根据好感度阶段返回玩家可见的 NPC 数据子集。
     

@@ -169,6 +169,24 @@ async def get_live_players():
     """Returns a list of the most recently active players for the live view."""
     return state_manager.get_most_recent_sessions(limit=10)
 
+@api_router.get("/scenarios")
+async def get_scenarios():
+    """返回所有可用剧本列表。"""
+    from .scenarios import list_scenarios
+    return list_scenarios()
+
+@api_router.get("/scenarios/{scenario_id}/characters")
+async def get_scenario_characters(scenario_id: str):
+    """返回指定剧本的可选角色列表及是否允许自定义角色。"""
+    from .scenarios import get_scenario_data
+    data = get_scenario_data(scenario_id)
+    if not data:
+        return {"characters": [], "allow_custom": True}
+    return {
+        "characters": data.get("playable_characters", []),
+        "allow_custom": data.get("allow_custom_character", True),
+    }
+
 @api_router.post("/game/init")
 async def init_game(
     current_user: Annotated[dict, Depends(auth.get_current_active_user)],
