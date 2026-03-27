@@ -1566,38 +1566,27 @@ function init() {
                 charGrid.innerHTML = '<span style="color:#888;font-size:0.8rem;">加载中…</span>';
                 try {
                     const resp = await fetch(`/api/scenarios/${scenarioId}/characters`);
-                    const result = await resp.json();
-                    // 兼容新格式 {characters, allow_custom} 和旧格式 [...]
-                    const characters = Array.isArray(result) ? result : (result.characters || []);
-                    const allowCustom = Array.isArray(result) ? true : (result.allow_custom !== false);
+                    const characters = await resp.json();
                     charGrid.innerHTML = '';
                     characters.forEach(ch => {
                         const btn = document.createElement('button');
                         btn.className = 'scenario-char-btn';
                         btn.innerHTML = `<span class="char-icon">${ch.icon || '👤'}</span><span class="char-name">${ch.name}</span><span class="char-desc">${ch.desc || ''}</span>`;
                         btn.addEventListener('click', () => {
-                            // 取消之前的选中
                             charGrid.querySelectorAll('.scenario-char-btn').forEach(b => b.classList.remove('selected'));
                             btn.classList.add('selected');
-                            // 填入名字
                             if (charNameInput) charNameInput.value = ch.name;
                         });
                         charGrid.appendChild(btn);
                     });
-                    // 如果不允许自定义角色，隐藏手动输入框和提示
-                    const customInputWrapper = charNameInput?.closest('div');
-                    const customHint = document.querySelector('.scenario-name-hint');
-                    if (!allowCustom) {
+                    // 只有一个可选角色时：自动选中并隐藏手动输入
+                    if (characters.length === 1) {
+                        const firstBtn = charGrid.querySelector('.scenario-char-btn');
+                        if (firstBtn) firstBtn.click();
+                        const customInputWrapper = charNameInput?.closest('div');
+                        const customHint = document.querySelector('.scenario-name-hint');
                         if (customInputWrapper) customInputWrapper.style.display = 'none';
                         if (customHint) customHint.style.display = 'none';
-                        // 只有一个角色时自动选中
-                        if (characters.length === 1) {
-                            const firstBtn = charGrid.querySelector('.scenario-char-btn');
-                            if (firstBtn) firstBtn.click();
-                        }
-                    } else {
-                        if (customInputWrapper) customInputWrapper.style.display = '';
-                        if (customHint) customHint.style.display = '';
                     }
                 } catch (e) {
                     charGrid.innerHTML = '<span style="color:#a00;font-size:0.8rem;">加载失败</span>';
