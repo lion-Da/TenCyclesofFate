@@ -2146,6 +2146,10 @@ async def _process_player_action_async(user_info: dict, action: str):
             session["display_history"] = [welcome] if welcome else []
             logger.info(f"Trial start: cleared histories for {player_id}")
 
+        # 记录试炼前的 opportunities 值，用于后续兜底判断
+        if is_starting_trial:
+            session["_pre_trial_opportunities"] = session.get("opportunities_remaining", 0)
+
         # ── Extract companion mode and difficulty from action ──
         # Frontend sends "开始试炼:独行:凡人修仙" or "开始试炼:同行:气运之子" etc.
         # Extended: "开始试炼:独行:凡人修仙:doupo:萧炎" (with scenario and character name)
@@ -2435,6 +2439,22 @@ async def _process_player_action_async(user_info: dict, action: str):
             except Exception as e:
                 logger.warning(f"剧本预设注入失败: {e}")
 
+        # --- 试炼开始兜底：确保 is_in_trial 和 opportunities_remaining 被正确设置 ---
+        # AI 可能遗漏在 state_update 中设置这些字段，这里程序化保证
+        if is_starting_trial and session.get("current_life"):
+            if not session.get("is_in_trial"):
+                session["is_in_trial"] = True
+                logger.warning(
+                    f"兜底: AI 未设置 is_in_trial=true，已由后端强制设置 ({player_id})"
+                )
+            expected_opp = session.get("_pre_trial_opportunities", session.get("opportunities_remaining", 0))
+            if session.get("opportunities_remaining") == expected_opp and expected_opp > 0:
+                session["opportunities_remaining"] = expected_opp - 1
+                logger.warning(
+                    f"兜底: AI 未扣减 opportunities_remaining，已由后端强制扣减 "
+                    f"{expected_opp} -> {expected_opp - 1} ({player_id})"
+                )
+
         # --- 静态字段合并：将姓名/出身等静态信息合并为「人物背景」 ---
         # 每次都检查，确保旧会话或遗漏情况也能补救
         if session.get("current_life"):
@@ -2455,6 +2475,9 @@ async def _process_player_action_async(user_info: dict, action: str):
                     session["display_history"].append(blessing_text)
             except Exception as e:
                 logger.error(f"应用先天奖励失败 {player_id}: {e}")
+
+        # 清理临时标记
+        session.pop("_pre_trial_opportunities", None)
 
         await state_manager.save_session(player_id, session)
         # --- Common final logic for both paths ---
