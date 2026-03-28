@@ -77,11 +77,11 @@ def _get_difficulty_preset(session: dict) -> dict:
     return DIFFICULTY_PRESETS.get(name, DIFFICULTY_PRESETS[DEFAULT_DIFFICULTY])
 
 
-def _clamp_attributes(current_life: dict, preset: dict) -> dict:
+def _clamp_attributes(current_life: dict, preset: dict, is_initial: bool = True) -> dict:
     """
     Clamp all numeric attributes in current_life.属性 according to difficulty preset.
+    When is_initial=True (trial start), also enforce a hard cap of 100 for initial generation.
     If a value is outside [attr_min, attr_max], re-randomize it within that range.
-    This ensures attributes feel naturally rolled within bounds, not just clamped.
     Returns modified current_life (in-place).
     """
     import random as _random
@@ -92,17 +92,26 @@ def _clamp_attributes(current_life: dict, preset: dict) -> dict:
     attr_min = preset.get("attr_min")
     attr_max = preset.get("attr_max")
 
-    if attr_min is None and attr_max is None:
+    # Initial generation cap: attributes start at most 100
+    initial_cap = 100 if is_initial else None
+
+    # Determine effective max: difficulty cap takes priority, else initial cap
+    effective_max = attr_max
+    if effective_max is None and initial_cap is not None:
+        effective_max = initial_cap
+    elif effective_max is not None and initial_cap is not None:
+        effective_max = min(effective_max, initial_cap)
+
+    if attr_min is None and effective_max is None:
         return current_life
 
     lo = attr_min if attr_min is not None else 1
-    hi = attr_max if attr_max is not None else 200
+    hi = effective_max if effective_max is not None else 100
 
     for key in attributes:
         try:
             val = int(attributes[key])
-            if (attr_min is not None and val < attr_min) or (attr_max is not None and val > attr_max):
-                # Re-randomize within allowed range instead of hard clamping
+            if (attr_min is not None and val < attr_min) or (effective_max is not None and val > effective_max):
                 val = _random.randint(lo, hi)
             attributes[key] = val
         except (ValueError, TypeError):
@@ -162,9 +171,10 @@ def _apply_talent_bonuses(current_life: dict) -> None:
 def _enforce_attribute_rules(session: dict, scenario_id: str) -> None:
     """
     Enforce character-specific attribute rules from scenario presets.
-    E.g. ensure '意志' is the highest attribute for 萧炎.
+    Supports:
+      - "固定属性": {"意志": 99}  → force specific attributes to exact values
+      - "最高属性": "意志"        → ensure an attribute is the highest
     """
-    import random as _random
     current_life = session.get("current_life")
     if not current_life:
         return
@@ -186,24 +196,18 @@ def _enforce_attribute_rules(session: dict, scenario_id: str) -> None:
     except Exception:
         return
 
-    # Rule: "最高属性" — ensure a specific attribute is the highest
-    top_attr_name = rules.get("最高属性")
-    top_attr_min = rules.get("最高属性下限", 70)
-    if top_attr_name and top_attr_name in attributes:
-        try:
-            current_max = max(int(v) for v in attributes.values() if isinstance(v, (int, float)) or (isinstance(v, str) and v.isdigit()))
-            top_val = int(attributes[top_attr_name])
-            if top_val <= current_max:
-                # Set it to current_max + random(5,15), capped at 200
-                new_val = min(200, current_max + _random.randint(5, 15))
-                new_val = max(new_val, top_attr_min)
-                attributes[top_attr_name] = min(200, new_val)
-                logger.info(
-                    f"属性规则: {top_attr_name} 强制提升为最高 "
-                    f"{top_val} -> {attributes[top_attr_name]} (其他最高={current_max})"
-                )
-        except (ValueError, TypeError):
-            pass
+    # Rule: "固定属性" — force specific attributes to exact values
+    fixed_attrs = rules.get("固定属性")
+    if fixed_attrs and isinstance(fixed_attrs, dict):
+        for attr_name, fixed_val in fixed_attrs.items():
+            if attr_name in attributes:
+                old_val = attributes[attr_name]
+                attributes[attr_name] = int(fixed_val)
+                logger.info(f"属性规则: {attr_name} 固定为 {fixed_val} (原值={old_val})")
+            else:
+                # Attribute not yet in dict (AI used different name), add it
+                attributes[attr_name] = int(fixed_val)
+                logger.info(f"属性规则: {attr_name} 新增并固定为 {fixed_val}")
 
 
 # --- Image Generation State ---
