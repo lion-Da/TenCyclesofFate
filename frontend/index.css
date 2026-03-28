@@ -1137,16 +1137,18 @@ body.app-fullscreen #app-container {
 /* Scenario selection buttons */
 .scenario-choices {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 0.5rem;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.6rem;
 }
 .scenario-btn {
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 0.7rem 0.5rem;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
+    justify-content: center;
+    padding: 1rem 0.8rem;
+    min-height: 90px;
+    border: 1.5px solid var(--border-color);
+    border-radius: 10px;
     background: rgba(0,0,0,0.2);
     color: var(--text-color);
     cursor: pointer;
@@ -1156,7 +1158,8 @@ body.app-fullscreen #app-container {
 .scenario-btn:hover {
     border-color: #c8a86e;
     background: rgba(200, 168, 110, 0.1);
-    transform: translateY(-1px);
+    transform: translateY(-2px);
+    box-shadow: 0 2px 8px rgba(200, 168, 110, 0.15);
 }
 .scenario-btn.selected {
     border-color: #c8a86e;
@@ -1166,15 +1169,15 @@ body.app-fullscreen #app-container {
 .scenario-btn.selected::after {
     content: '✓';
     position: absolute;
-    top: 4px;
-    right: 8px;
-    font-size: 0.8rem;
+    top: 6px;
+    right: 10px;
+    font-size: 0.9rem;
     color: #c8a86e;
     font-weight: bold;
 }
-.scenario-btn .btn-icon { font-size: 1.3rem; margin-bottom: 0.2rem; }
-.scenario-btn .btn-label { font-size: 0.85rem; font-weight: bold; margin-bottom: 0.15rem; }
-.scenario-btn .btn-hint { font-size: 0.6rem; color: #888; line-height: 1.3; text-align: center; }
+.scenario-btn .btn-icon { font-size: 1.6rem; margin-bottom: 0.3rem; }
+.scenario-btn .btn-label { font-size: 1rem; font-weight: bold; margin-bottom: 0.2rem; }
+.scenario-btn .btn-hint { font-size: 0.7rem; color: #888; line-height: 1.3; text-align: center; }
 
 .scenario-name-input {
     width: 100%;
