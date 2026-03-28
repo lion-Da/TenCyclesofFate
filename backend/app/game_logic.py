@@ -80,8 +80,11 @@ def _get_difficulty_preset(session: dict) -> dict:
 def _clamp_attributes(current_life: dict, preset: dict) -> dict:
     """
     Clamp all numeric attributes in current_life.属性 according to difficulty preset.
+    If a value is outside [attr_min, attr_max], re-randomize it within that range.
+    This ensures attributes feel naturally rolled within bounds, not just clamped.
     Returns modified current_life (in-place).
     """
+    import random as _random
     attributes = current_life.get("属性")
     if not attributes or not isinstance(attributes, dict):
         return current_life
@@ -92,18 +95,69 @@ def _clamp_attributes(current_life: dict, preset: dict) -> dict:
     if attr_min is None and attr_max is None:
         return current_life
 
+    lo = attr_min if attr_min is not None else 1
+    hi = attr_max if attr_max is not None else 200
+
     for key in attributes:
         try:
             val = int(attributes[key])
-            if attr_min is not None:
-                val = max(val, attr_min)
-            if attr_max is not None:
-                val = min(val, attr_max)
+            if (attr_min is not None and val < attr_min) or (attr_max is not None and val > attr_max):
+                # Re-randomize within allowed range instead of hard clamping
+                val = _random.randint(lo, hi)
             attributes[key] = val
         except (ValueError, TypeError):
             continue
-
     return current_life
+
+
+def _apply_talent_bonuses(current_life: dict) -> None:
+    """
+    Parse talent description for attribute bonuses and apply them.
+    Supports patterns like:
+      "魂穿（灵觉、意志+10）" → 灵觉+10, 意志+10
+      "天资聪颖（悟性+15）"   → 悟性+15
+    Bonuses are applied AFTER difficulty clamping, so they are final.
+    """
+    import re as _re
+    talent = current_life.get("初始天赋", "")
+    if not talent or not isinstance(talent, str):
+        return
+
+    attributes = current_life.get("属性")
+    if not attributes or not isinstance(attributes, dict):
+        return
+
+    # Find all patterns like "（xxx+N）" or "(xxx+N)"
+    # Matches: 灵觉、意志+10  or  悟性+15  or  根骨、气运+5
+    bonus_patterns = _re.findall(r'[（(]([^）)]+\+\d+)[）)]', talent)
+    if not bonus_patterns:
+        return
+
+    applied = []
+    for pattern in bonus_patterns:
+        # Extract bonus value: last +N in the pattern
+        match = _re.search(r'\+(\d+)$', pattern.strip())
+        if not match:
+            continue
+        bonus = int(match.group(1))
+        # Everything before the +N is the attribute list
+        attr_part = pattern[:match.start()].strip()
+        # Split by Chinese/English comma and 、
+        attr_names = _re.split(r'[,，、]', attr_part)
+        attr_names = [a.strip() for a in attr_names if a.strip()]
+
+        for attr_name in attr_names:
+            if attr_name in attributes:
+                try:
+                    old_val = int(attributes[attr_name])
+                    attributes[attr_name] = min(200, old_val + bonus)
+                    applied.append(f"{attr_name}: {old_val}+{bonus}={attributes[attr_name]}")
+                except (ValueError, TypeError):
+                    continue
+
+    if applied:
+        logger.info(f"天赋属性加成: {', '.join(applied)}")
+
 
 # --- Image Generation State ---
 # 记录每个玩家的最后活动时间，用于判断是否触发图片生成
@@ -2445,6 +2499,11 @@ async def _process_player_action_async(user_info: dict, action: str):
                         )
             except Exception as e:
                 logger.warning(f"剧本预设注入失败: {e}")
+
+        # --- 天赋属性加成：解析初始天赋描述中的属性+N并应用 ---
+        # 例如 "魂穿（灵觉、意志+10）" → 灵觉+10, 意志+10
+        if is_starting_trial and session.get("current_life"):
+            _apply_talent_bonuses(session["current_life"])
 
         # --- 试炼开始兜底：确保 is_in_trial 和 opportunities_remaining 被正确设置 ---
         # AI 可能遗漏在 state_update 中设置这些字段，这里程序化保证
