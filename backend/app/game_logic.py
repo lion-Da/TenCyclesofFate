@@ -2479,7 +2479,8 @@ async def _process_player_action_async(user_info: dict, action: str):
                             if isinstance(npc_data, dict):
                                 cl["人物关系"][npc_name] = dict(npc_data)
                         logger.info(
-                            f"剧本预设人物关系注入: {list(preset_relations.keys())}"
+                            f"剧本预设人物关系注入: "
+                            f"{[(k, v.get('好感度')) for k, v in preset_relations.items() if isinstance(v, dict)]}"
                         )
                     # 注入预设物品（确保关键道具如黑色戒指必定存在）
                     if "物品" in char_preset:
