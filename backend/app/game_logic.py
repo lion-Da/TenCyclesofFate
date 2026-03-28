@@ -159,6 +159,53 @@ def _apply_talent_bonuses(current_life: dict) -> None:
         logger.info(f"天赋属性加成: {', '.join(applied)}")
 
 
+def _enforce_attribute_rules(session: dict, scenario_id: str) -> None:
+    """
+    Enforce character-specific attribute rules from scenario presets.
+    E.g. ensure '意志' is the highest attribute for 萧炎.
+    """
+    import random as _random
+    current_life = session.get("current_life")
+    if not current_life:
+        return
+    attributes = current_life.get("属性")
+    if not attributes or not isinstance(attributes, dict):
+        return
+
+    try:
+        from .scenarios import get_character_preset
+        char_preset = get_character_preset(
+            scenario_id,
+            session.get("player_character_name", ""),
+        )
+        if not char_preset:
+            return
+        rules = char_preset.get("属性规则")
+        if not rules:
+            return
+    except Exception:
+        return
+
+    # Rule: "最高属性" — ensure a specific attribute is the highest
+    top_attr_name = rules.get("最高属性")
+    top_attr_min = rules.get("最高属性下限", 70)
+    if top_attr_name and top_attr_name in attributes:
+        try:
+            current_max = max(int(v) for v in attributes.values() if isinstance(v, (int, float)) or (isinstance(v, str) and v.isdigit()))
+            top_val = int(attributes[top_attr_name])
+            if top_val <= current_max:
+                # Set it to current_max + random(5,15), capped at 200
+                new_val = min(200, current_max + _random.randint(5, 15))
+                new_val = max(new_val, top_attr_min)
+                attributes[top_attr_name] = min(200, new_val)
+                logger.info(
+                    f"属性规则: {top_attr_name} 强制提升为最高 "
+                    f"{top_val} -> {attributes[top_attr_name]} (其他最高={current_max})"
+                )
+        except (ValueError, TypeError):
+            pass
+
+
 # --- Image Generation State ---
 # 记录每个玩家的最后活动时间，用于判断是否触发图片生成
 _pending_image_tasks: dict[str, asyncio.Task] = {}
@@ -2502,9 +2549,14 @@ async def _process_player_action_async(user_info: dict, action: str):
                 logger.warning(f"剧本预设注入失败: {e}")
 
         # --- 天赋属性加成：解析初始天赋描述中的属性+N并应用 ---
+        # 必须在 _consolidate_static_fields 之前执行，因为合并后"初始天赋"字段会被删除
         # 例如 "魂穿（灵觉、意志+10）" → 灵觉+10, 意志+10
         if is_starting_trial and session.get("current_life"):
             _apply_talent_bonuses(session["current_life"])
+
+        # --- 剧本角色属性规则：强制保证特定属性为最高 ---
+        if is_starting_trial and session.get("current_life") and effective_scenario != "freestyle":
+            _enforce_attribute_rules(session, effective_scenario)
 
         # --- 试炼开始兜底：确保 is_in_trial 和 opportunities_remaining 被正确设置 ---
         # AI 可能遗漏在 state_update 中设置这些字段，这里程序化保证
