@@ -904,8 +904,15 @@ def _consolidate_static_fields(session: dict) -> None:
     if not current_life or not isinstance(current_life, dict):
         return
     
-    # 如果已经合并过，跳过
+    # 如果已经合并过（人物背景已存在），仍需清理残留的独立字段
     if "人物背景" in current_life:
+        cleaned = []
+        for field in STATIC_FIELDS:
+            if field in current_life:
+                current_life.pop(field, None)
+                cleaned.append(field)
+        if cleaned:
+            logger.info(f"清理「人物背景」已存在时的残留字段: {cleaned}")
         return
     
     parts = []

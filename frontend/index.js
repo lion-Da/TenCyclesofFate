@@ -871,9 +871,14 @@ function renderCharacterStatus() {
 
         // 英文key自动翻译为中文显示名
         const cnKey = EN_TO_CN_KEY_MAP[key.toLowerCase()] || EN_TO_CN_KEY_MAP[key] || null;
-        const displayKey = cnKey || key;
+        let displayKey = cnKey || key;
         // 用于特殊渲染匹配的规范key（优先中文）
         const matchKey = cnKey || key;
+
+        // 剧本模式货币名称替换：灵石→金币
+        if (displayKey === '灵石' && appState.gameState?.scenario_id && appState.gameState.scenario_id !== 'freestyle') {
+            displayKey = '金币';
+        }
 
         // ── 人物背景: 特殊渲染为固定展开的概要区 ──
         if (matchKey === '人物背景') {
