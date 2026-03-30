@@ -1822,18 +1822,19 @@ body.app-fullscreen #app-container {
 }
 
 .cultivation-panel > p {
-    font-size: 0.9rem;
-    color: #a08050;
-    margin-bottom: 0.4rem;
+    font-size: 0.95rem;
+    color: #c8a86e;
+    margin-bottom: 0.5rem;
     letter-spacing: 0.1em;
+    font-weight: 600;
 }
 
 .cultivation-card {
-    background: rgba(30, 25, 15, 0.6);
-    border: 1px solid rgba(120, 100, 70, 0.3);
-    border-radius: 5px;
-    padding: 0.45rem 0.55rem;
-    margin-bottom: 0.4rem;
+    background: rgba(45, 38, 25, 0.75);
+    border: 1px solid rgba(160, 130, 80, 0.35);
+    border-radius: 6px;
+    padding: 0.55rem 0.65rem;
+    margin-bottom: 0.5rem;
     transition: border-color 0.2s, box-shadow 0.2s;
 }
 
@@ -1872,9 +1873,9 @@ body.app-fullscreen #app-container {
 }
 
 .cultivation-name {
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: #d4c4a0;
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #efe0c0;
     flex: 1;
     min-width: 0;
     overflow: hidden;
@@ -1883,27 +1884,28 @@ body.app-fullscreen #app-container {
 }
 
 .cultivation-grade-badge {
-    font-size: 0.65rem;
+    font-size: 0.72rem;
+    font-weight: 600;
     border: 1px solid;
     border-radius: 3px;
-    padding: 0.1rem 0.3rem;
+    padding: 0.15rem 0.35rem;
     white-space: nowrap;
     letter-spacing: 0.05em;
     flex-shrink: 0;
 }
 
 .cultivation-type {
-    font-size: 0.7rem;
-    color: #908060;
-    margin-top: 0.2rem;
+    font-size: 0.78rem;
+    color: #b8a070;
+    margin-top: 0.25rem;
     letter-spacing: 0.05em;
 }
 
 .cultivation-desc {
-    font-size: 0.72rem;
-    color: #7a6a50;
-    margin-top: 0.15rem;
-    line-height: 1.35;
+    font-size: 0.78rem;
+    color: #a09070;
+    margin-top: 0.2rem;
+    line-height: 1.4;
 }
 
 /* 总战力 */
@@ -1911,22 +1913,23 @@ body.app-fullscreen #app-container {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-top: 0.5rem;
-    padding: 0.35rem 0.5rem;
-    background: rgba(60, 40, 20, 0.4);
-    border: 1px solid rgba(180, 140, 80, 0.25);
-    border-radius: 4px;
+    margin-top: 0.6rem;
+    padding: 0.45rem 0.6rem;
+    background: rgba(60, 40, 20, 0.55);
+    border: 1px solid rgba(200, 160, 80, 0.35);
+    border-radius: 5px;
 }
 
 .cultivation-power-label {
-    font-size: 0.75rem;
-    color: #a08050;
+    font-size: 0.82rem;
+    color: #c0a060;
     letter-spacing: 0.15em;
+    font-weight: 600;
 }
 
 .cultivation-power-value {
-    font-size: 0.95rem;
+    font-size: 1.05rem;
     font-weight: 700;
-    color: #e8b84b;
-    text-shadow: 0 0 4px rgba(232, 184, 75, 0.3);
+    color: #f0c850;
+    text-shadow: 0 0 6px rgba(240, 200, 80, 0.4);
 }
