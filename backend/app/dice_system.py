@@ -60,6 +60,20 @@ COMBAT_ROLL_KEYWORDS = [
     "功法", "运功", "催动", "真元", "灵力",
 ]
 
+# 突破类判定关键词 — 受境界稳固度影响
+BREAKTHROUGH_ROLL_KEYWORDS = [
+    "突破", "进阶", "晋级", "渡劫", "冲击",
+    "破境", "升阶", "提升境界", "凝丹", "结丹",
+    "筑基", "元婴", "化神", "炼虚", "合体", "大乘",
+]
+
+# 境界稳固度对突破判定的成功率乘数
+REALM_STABILITY_MULTIPLIER = {
+    "虚浮": 0.5,   # 成功率减半
+    "稳固": 0.75,  # 成功率×0.75
+    "圆满": 1.0,   # 无惩罚
+}
+
 
 def _find_relevant_attribute(roll_type: str, attributes: dict[str, Any]) -> int | None:
     """
@@ -261,9 +275,33 @@ def calculate_final_success_rate(
     if combat_power > 0 and any(kw in roll_type for kw in COMBAT_ROLL_KEYWORDS):
         combat_bonus = cultivation_system.calculate_combat_power_bonus(combat_power)
 
+    # 境界稳固度惩罚 (仅对突破类判定生效)
+    realm_stability_penalty = 0.0
+    realm_stability = ""
+    is_breakthrough_roll = any(kw in roll_type for kw in BREAKTHROUGH_ROLL_KEYWORDS)
+    if is_breakthrough_roll and current_life and isinstance(current_life, dict):
+        realm_stability = current_life.get("境界稳固度", "")
+        if realm_stability and realm_stability in REALM_STABILITY_MULTIPLIER:
+            multiplier = REALM_STABILITY_MULTIPLIER[realm_stability]
+            if multiplier < 1.0:
+                realm_stability_penalty = multiplier
+        else:
+            # 没有设置稳固度时不惩罚（可能是首次突破或开局）
+            realm_stability_penalty = 0.0
+
     # 合计
     total_bonus = attr_bonus + item_bonus + status_bonus + combat_bonus
     final_rate = base_rate + total_bonus
+
+    # 应用境界稳固度惩罚（在加成后、硬上限前）
+    if realm_stability_penalty > 0:
+        pre_penalty_rate = final_rate
+        final_rate = final_rate * realm_stability_penalty
+        logger.info(
+            f"境界稳固度惩罚: 稳固度={realm_stability}, "
+            f"乘数={realm_stability_penalty}, "
+            f"成功率 {pre_penalty_rate:.1f}% -> {final_rate:.1f}%"
+        )
 
     # 硬上限 95%，下限 5%（给玩家最低希望）
     final_rate = max(5, min(MAX_SUCCESS_RATE, final_rate))
@@ -280,15 +318,22 @@ def calculate_final_success_rate(
         "status_bonus": status_bonus,
         "combat_power": combat_power,
         "combat_bonus": combat_bonus,
+        "realm_stability": realm_stability if is_breakthrough_roll else "",
+        "realm_stability_penalty": round((1 - realm_stability_penalty) * 100) if realm_stability_penalty > 0 else 0,
         "total_bonus": total_bonus,
         "final_rate": round(final_rate, 1),
         "final_target": final_target,
     }
 
+    stability_info = ""
+    if is_breakthrough_roll and realm_stability:
+        penalty_pct = round((1 - realm_stability_penalty) * 100) if realm_stability_penalty > 0 else 0
+        stability_info = f", realm_stability={realm_stability}(-{penalty_pct}%)"
+
     logger.info(
         f"骰子判定计算: type={roll_type}, base={base_rate:.1f}%, "
         f"attr={attr_bonus:+d}%, item={item_bonus:+d}%, status={status_bonus:+d}%, "
-        f"combat={combat_bonus:+d}%(power={combat_power}), "
+        f"combat={combat_bonus:+d}%(power={combat_power}){stability_info}, "
         f"final={final_rate:.1f}% (target={final_target}/{sides})"
     )
 

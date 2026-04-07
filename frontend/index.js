@@ -835,7 +835,7 @@ function renderCharacterStatus() {
     }
 
     // --- 定义渲染顺序和特殊处理 ---
-    const SKIP_KEYS = ['人物关系', '功法'];
+    const SKIP_KEYS = ['人物关系', '功法', '境界稳固度'];
     // 判断是否应该跳过：精确匹配或前缀匹配（如 "人物关系.柳如烟"）
     const shouldSkip = (k) => SKIP_KEYS.some(sk => k === sk || k.startsWith(sk + '.'));
     // 临时事件字段前缀：以 "~" 开头的字段视为临时事件，其余全部为持久字段
@@ -944,6 +944,27 @@ function renderCharacterStatus() {
             details.appendChild(content);
             // 故事事件默认展开
             details.open = true;
+            container.appendChild(details);
+            return;
+        }
+
+        // ── 境界: 附加稳固度标记 ──
+        if (matchKey === '境界' && typeof value === 'string') {
+            const stability = current_life['境界稳固度'] || '';
+            const stabilityColors = { '虚浮': '#e74c3c', '稳固': '#e8b84b', '圆满': '#4ade80' };
+            const details = document.createElement('details');
+            const summary = document.createElement('summary');
+            summary.textContent = '境界';
+            details.appendChild(summary);
+            const content = document.createElement('div');
+            content.classList.add('details-content');
+            let html = `<span class="property-value">${esc(value)}</span>`;
+            if (stability) {
+                const color = stabilityColors[stability] || '#a08050';
+                html += ` <span style="font-size:0.78rem;color:${color};font-weight:600;border:1px solid ${color};border-radius:3px;padding:0.1rem 0.3rem;margin-left:0.3rem;">${esc(stability)}</span>`;
+            }
+            content.innerHTML = html;
+            details.appendChild(content);
             container.appendChild(details);
             return;
         }
@@ -1068,7 +1089,6 @@ function renderCultivationPanel(currentLife) {
 
         card.innerHTML = `
             <div class="cultivation-card-header">
-                <span class="cultivation-icon" style="color:${config.color}">${config.icon}</span>
                 <span class="cultivation-name">${esc(name)}</span>
                 <span class="cultivation-grade-badge" style="border-color:${config.color};color:${config.color}">${esc(gradeLabel)}</span>
             </div>
@@ -1287,6 +1307,15 @@ function renderRollEvent(rollEvent) {
             label: '功德加成',
             value: `+${breakdown.legacy_bonus}%`,
             cls: 'positive'
+        });
+    }
+
+    // 境界稳固度惩罚 (突破类判定)
+    if (breakdown.realm_stability && breakdown.realm_stability_penalty > 0) {
+        items.push({
+            label: `境界${breakdown.realm_stability}`,
+            value: `-${breakdown.realm_stability_penalty}%`,
+            cls: 'negative'
         });
     }
 

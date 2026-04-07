@@ -950,6 +950,41 @@ def _robust_json_loads(json_str: str) -> dict:
             except json.JSONDecodeError:
                 pass
 
+    # 策略6：处理 "Extra data" — AI 输出被截断或拼接了多段 JSON
+    # 用 json.JSONDecoder 的 raw_decode 只解析第一个完整对象
+    try:
+        decoder = json.JSONDecoder()
+        obj, _ = decoder.raw_decode(original)
+        if isinstance(obj, dict):
+            logger.info("_robust_json_loads: raw_decode 成功提取第一个完整JSON对象")
+            return obj
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # 策略7：截断的 JSON 修复 — 尝试从不完整 JSON 中提取已有字段
+    # AI 响应可能在 max_tokens 处被截断，导致 JSON 不完整
+    try:
+        # 尝试补全截断的 JSON：逐步删除末尾内容直到可解析
+        truncated = original.rstrip()
+        for _ in range(min(200, len(truncated))):
+            # 尝试补全各种可能的闭合
+            for suffix in ['"}', '"}}}', '"]}', '"]}}', '}}', '}', ']}', '"}}']:
+                try:
+                    result = json.loads(truncated + suffix)
+                    if isinstance(result, dict) and result.get("narrative"):
+                        logger.info(
+                            f"_robust_json_loads: 截断修复成功 (补 '{suffix}', 去尾 {len(original) - len(truncated)} chars)"
+                        )
+                        return result
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            # 去掉最后一个字符再试
+            truncated = truncated[:-1].rstrip()
+            if not truncated:
+                break
+    except Exception:
+        pass
+
     # 所有策略失败，抛出原始错误
     logger.error(f"_robust_json_loads: All parsing strategies failed. Raw input (first 500 chars): {original[:500]}")
     return json.loads(original)  # 让它抛出原始错误
@@ -1360,10 +1395,22 @@ def _apply_state_update(state: dict, update: dict) -> dict:
 
         keys = key.split(".")
         temp_state = state
+        skip = False
         for part in keys[:-1]:
             if part not in temp_state or temp_state[part] is None:
                 temp_state[part] = {}
+            if not isinstance(temp_state[part], dict):
+                # Intermediate key points to a non-dict (e.g. str, int).
+                # Cannot drill deeper — skip this update to avoid crash.
+                logger.warning(
+                    f"state_update key '{key}' 路径中 '{part}' 的值不是dict "
+                    f"(type={type(temp_state[part]).__name__})，跳过此更新"
+                )
+                skip = True
+                break
             temp_state = temp_state[part]
+        if skip:
+            continue
 
         # Handle null → delete field (AI sets value to null to clean up)
         if value is None:
@@ -2561,6 +2608,13 @@ async def _process_player_action_async(user_info: dict, action: str):
         # --- 剧本角色属性规则：强制保证特定属性为最高 ---
         if is_starting_trial and session.get("current_life") and effective_scenario != "freestyle":
             _enforce_attribute_rules(session, effective_scenario)
+
+        # --- 境界稳固度：开局角色已有的境界默认为"圆满" ---
+        if is_starting_trial and session.get("current_life"):
+            cl = session["current_life"]
+            if cl.get("境界") and not cl.get("境界稳固度"):
+                cl["境界稳固度"] = "圆满"
+                logger.info(f"境界稳固度初始化: 圆满 (境界={cl.get('境界')})")
 
         # --- 试炼开始兜底：确保 is_in_trial 和 opportunities_remaining 被正确设置 ---
         # AI 可能遗漏在 state_update 中设置这些字段，这里程序化保证

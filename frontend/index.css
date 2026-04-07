@@ -1867,20 +1867,13 @@ body.app-fullscreen #app-container {
     flex-wrap: wrap;
 }
 
-.cultivation-icon {
-    font-size: 1rem;
-    line-height: 1;
-}
-
 .cultivation-name {
     font-size: 0.95rem;
     font-weight: 700;
     color: #efe0c0;
     flex: 1;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    word-break: break-all;
 }
 
 .cultivation-grade-badge {
